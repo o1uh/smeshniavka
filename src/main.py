@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+from aiogram.enums import UpdateType
+
 from src.ops.config import load_config
 from src.ops.log import setup_logging, logger
 from src.db.manager import DatabaseManager

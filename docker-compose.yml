@@ -15,6 +15,7 @@ services:
       - ./backups:/app/backups
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
+      - ./src:/app/src:ro
     healthcheck:
       test: ["CMD", "python", "-m", "src.tools.healthcheck"]
       interval: 30s
