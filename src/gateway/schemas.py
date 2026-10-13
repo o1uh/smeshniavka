@@ -66,6 +66,13 @@ class DossierField(str, Enum):
     triggers = "triggers"
     facts = "facts"
 
+    @classmethod
+    def _missing_(cls, value):
+        val_str = str(value).lower()
+        if val_str in ("hobby", "hobbies", "entertainment", "games", "game"):
+            return cls.interests
+        return cls.facts
+
 
 class Observation(BaseModel):
     model_config = ConfigDict(extra="forbid")

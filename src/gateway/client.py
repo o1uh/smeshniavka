@@ -2,6 +2,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import re
 import time
 from datetime import datetime
 from typing import Any, Optional, Union
@@ -366,8 +367,6 @@ class GeminiGateway(Gateway):
 
         if response_schema:
             generation_config["responseMimeType"] = "application/json"
-            if issubclass(response_schema, BaseModel):
-                generation_config["responseSchema"] = clean_schema_for_gemini(response_schema.model_json_schema())
 
         # Safety settings: All 4 OFF per R9
         safety_settings = [
@@ -392,7 +391,7 @@ class GeminiGateway(Gateway):
             payload["tools"] = [{"googleSearch": {}}]
 
         candidate_models = [model_id]
-        for fallback in ("gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"):
+        for fallback in ("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest", "gemini-3.8-flash"):
             if fallback not in candidate_models:
                 candidate_models.append(fallback)
 
@@ -463,9 +462,14 @@ class GeminiGateway(Gateway):
                         try:
                             parsed_json = json.loads(raw_text)
                             return response_schema.model_validate(parsed_json)
-                        except Exception as e:
-                            logger.error("JSON schema validation failed for '%s': %s (raw: %.100s)", prompt_name, e, raw_text)
-                            return None
+                        except Exception:
+                            try:
+                                cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
+                                parsed_json = json.loads(cleaned_text)
+                                return response_schema.model_validate(parsed_json)
+                            except Exception as e:
+                                logger.error("JSON schema validation failed for '%s': %s (raw: %.100s)", prompt_name, e, raw_text)
+                                return None
 
                     return raw_text
 
