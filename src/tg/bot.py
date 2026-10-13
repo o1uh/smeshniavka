@@ -399,6 +399,7 @@ class FunnyBotApp:
     ) -> None:
         chat_id = message.chat.id
         media_cache_item = None
+        asyncio.create_task(self.sender.send_chat_action(chat_id, "typing"))
 
         # If media is present, do Step 1 media_analyze
         if media_kind and file_id and file_unique_id:

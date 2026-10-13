@@ -273,6 +273,9 @@ class GeminiGateway(Gateway):
         elif error_type in ("AUTH_ERROR", "INVALID_KEY"):
             key_bucket.is_dead = True
             logger.error("Key %s invalid or unauthorized (401/403)! Marked DEAD", key_bucket.key_env)
+        elif error_type in ("SERVER_5XX", "TIMEOUT"):
+            key_bucket.cooldown_until = now + 60.0
+            logger.warning("Key %s hit %s! Temporary cooldown 60s", key_bucket.key_env, error_type)
 
     async def _acquire_slot(self, priority: str) -> bool:
         while True:
@@ -410,7 +413,7 @@ class GeminiGateway(Gateway):
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key_bucket.api_key}"
 
             try:
-                resp = await self._client.post(url, json=payload)
+                resp = await self._client.post(url, json=payload, timeout=12.0)
                 status = resp.status_code
 
                 if status == 200:
@@ -491,15 +494,16 @@ class GeminiGateway(Gateway):
 
                 elif status >= 500:
                     logger.warning("Gemini 5xx server error (%d) on key %s", status, key_bucket.key_env)
-                    # Retry with next key
+                    self._mark_key_cooldown(key_bucket, "SERVER_5XX")
                     continue
 
                 else:
                     logger.error("Gemini unexpected error %d: %s", status, resp.text)
                     return None
 
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
-                logger.warning("Network error on key %s: %s", key_bucket.key_env, net_err)
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.TimeoutException) as net_err:
+                logger.warning("Network/Timeout error on key %s: %s", key_bucket.key_env, net_err)
+                self._mark_key_cooldown(key_bucket, "TIMEOUT")
                 continue
             except Exception as e:
                 logger.error("Unexpected exception during Gemini call: %s", e)
