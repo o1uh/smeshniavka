@@ -1,0 +1,20 @@
+services:
+  bot:
+    build: .
+    container_name: funny-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./backups:/app/backups
+      - ./config:/app/config:ro
+      - ./prompts:/app/prompts:ro
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.tools.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

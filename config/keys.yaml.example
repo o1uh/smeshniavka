@@ -1,0 +1,39 @@
+# Конфигурация ключей Gemini API (без самих секретов!)
+# Сами значения секретов хранятся исключительно в .env (GEMINI_KEY_1=..., GEMINI_KEY_2=...)
+# Число ключей произвольное: бот поддерживает сколько угодно ключей.
+#
+# Поля:
+#   key_env: имя переменной окружения в .env
+#   rpm_limit: лимит запросов в минуту (по умолчанию 15 для Free Tier)
+#   rpd_limit: лимит запросов в день (по умолчанию 500 для Free Tier; 0 = не считать)
+#   tpm_limit: лимит токенов в минуту (по умолчанию 250000)
+#   project: (опционально) ID проекта Google Cloud. Ключи с одинаковым project делят лимиты.
+#   reserve: (опционально) true если ключ резервный (используется только для P0-ответов при падении основных)
+
+keys:
+  - key_env: GEMINI_KEY_1
+    rpm_limit: 15
+    rpd_limit: 500
+    tpm_limit: 250000
+    project: default
+    reserve: false
+
+  - key_env: GEMINI_KEY_2
+    rpm_limit: 15
+    rpd_limit: 500
+    tpm_limit: 250000
+    project: default
+    reserve: false
+
+  - key_env: GEMINI_KEY_3
+    rpm_limit: 15
+    rpd_limit: 500
+    tpm_limit: 250000
+    project: proj2
+    reserve: false
+
+  - key_env: GEMINI_KEY_RESERVE
+    rpm_limit: 15
+    rpd_limit: 500
+    tpm_limit: 250000
+    reserve: true

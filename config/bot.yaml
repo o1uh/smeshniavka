@@ -1,0 +1,94 @@
+# Основной конфиг «Смешнявки»
+# Числовые лимиты соответствуют спецификации R1-R13
+
+ALLOWED_CHAT_ID: 0 # ID целевого чата из discover (отрицательный для супергрупп)
+OWNER_IDS: []      # ID владельцев бота (также могут быть заданы через env OWNER_IDS=123,456)
+MODEL_ID: "gemini-2.5-flash" # Обязателен, без дефолта
+TZ: "Asia/Novosibirsk"
+BOT_ALIASES: ["смешняв", "смешнявка"]
+SAFETY: "all OFF"
+PII_SCRUB: true
+LOG_CONTENT: false
+
+# Concurrency & priorities
+MAX_CONCURRENT: 4
+RPM_P0_RESERVE: 5
+BUDGET_P2_MAX: 70
+BUDGET_P1_MAX: 90
+
+# Ping policy
+PING_LIMIT: 20
+PING_WINDOW_S: 60
+PING_QUEUE_MAX: 30
+PING_QUEUE_TTL_S: 300
+RATE_NOTICE_COOLDOWN_S: 120
+TG_SEND_PER_MIN: 18
+TG_SEND_QUEUE_MAX: 100
+FOLLOWUP_WINDOW_S: 45
+
+# Proactive policy
+PROACTIVE_MIN: 10
+PROACTIVE_MAX: 25
+RANDOM_P: 0.15
+PROACTIVE_ACTIVE_MIN: 15
+COOLDOWN_S: 60
+PROACTIVE_MAX_PER_HOUR: 4
+PROACTIVE_MAX_PER_DAY: 15
+NIGHT_START: "03:00"
+NIGHT_END: "07:00"
+
+# Media policy
+MEDIA_AUTO_PER_DAY: 300
+MEDIA_AUTO_ANALYZE_P:
+  voice: 1.0
+  video_note: 1.0
+  video: 0.3
+  photo: 0.3
+  audio: 0.0
+  animation: 0.0
+MEDIA_AUTO_REACT_VIDEO_P: 0.05
+MEDIA_AUTO_REACT_AUDIO_P: 0.15
+MEDIA_AUTO_REACT_VOICE_P: 0.05
+MEDIA_AUTO_REACT_VIDEO_NOTE_P: 0.05
+MEDIA_AUTO_REACT_PHOTO_P: 0.03
+MEDIA_AUTO_REACT_ANIMATION_P: 0.03
+
+# Context & history
+CTX_LAST: 60
+SUMMARY_TOK: 800
+CHUNK_SUMMARY_TOK: 300
+THREAD_CHAIN_DEPTH: 3
+THREAD_NEIGHBORS: 10
+
+# Dossier
+DOSSIER_EVERY: 40
+DOSSIER_MAX_WINDOW: 120
+DOSSIER_CONSOLIDATE_EVERY: "24h"
+RECENT_TTL_DAYS: 30
+CLAIM_MIN_COUNT: 3
+DOSSIER_SLICES_MAX: 5
+STYLE_EXAMPLES_N: 8
+STYLE_FILTER_BATCH: 30
+
+# Research
+SEARCH_FORCE_TRIGGERS: ["загугли", "погугли", "ресерч", "пруф", "чекни"]
+LINK_TRIGGERS: ["что за", "о чём", "пруф", "суть"]
+LINK_TRIGGERS_SHOW: ["загугли", "пруф", "дай ссылку", "источник"]
+RESEARCH_TTL_H: 72
+RESEARCH_CACHE_MAX: 1000
+
+# Cache & Retention
+MEDIA_CACHE_MAX: 2000
+MSG_RETENTION_DAYS: 30
+MSG_RETENTION_ROWS: 20000
+IMPORT_MAX_DAYS: 30
+IMPORT_DOSSIER_WINDOW: 400
+IMPORT_MAX_CALLS: 300
+STALE_UPDATE_S: 120
+
+# Operations
+SHADOW_MODE: true
+ALERT_KEYS_DOWN_S: 600
+ALERT_DISK_MIN_MB: 500
+ALERT_COOLDOWN_S: 3600
+CONFLICT_MAX_WAIT_S: 900

@@ -1,0 +1,29 @@
+[Unit]
+Description=Funny Bot (Смешнявка) Telegram Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/opt/funny-bot
+ExecStart=/opt/funny-bot/.venv/bin/python -m src.main
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+RestartPreventExitStatus=75
+UMask=0077
+EnvironmentFile=-/opt/funny-bot/.env
+KillMode=mixed
+TimeoutStopSec=15
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

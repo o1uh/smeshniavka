@@ -1,0 +1,31 @@
+# Environment & secrets
+.env
+config/keys.yaml
+
+# Data & databases
+data/
+*.db
+*.db-wal
+*.db-shm
+backups/
+
+# Logs & reports
+logs/
+reports/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Dynamic persona examples
+prompts/style_examples.yaml
+prompts/style_examples.candidates.yaml
+
+# OS / temporary
+.DS_Store
+*.swp
+*.swo
+/tmp/
