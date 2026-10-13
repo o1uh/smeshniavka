@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from src.ops.config import KeyConfig, AppConfig
 from src.ops.log import logger
 from src.db.contracts import Gateway
+from src.gateway.schemas import PersonaTextReply
 
 
 class KeyBucket:
@@ -390,11 +391,6 @@ class GeminiGateway(Gateway):
         if enable_search:
             payload["tools"] = [{"googleSearch": {}}]
 
-        candidate_models = [model_id]
-        for fallback in ("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest", "gemini-3.8-flash"):
-            if fallback not in candidate_models:
-                candidate_models.append(fallback)
-
         # Rotation loop
         while True:
             key_bucket = self._select_available_key(priority, estimated_tokens)
@@ -411,24 +407,11 @@ class GeminiGateway(Gateway):
             now = time.time()
             key_bucket.record_usage(estimated_tokens, now)
 
-            resp = None
-            status = 0
-            for curr_model in candidate_models:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{curr_model}:generateContent?key={key_bucket.api_key}"
-                try:
-                    resp = await self._client.post(url, json=payload)
-                    status = resp.status_code
-                    if status not in (404, 503):
-                        break
-                    logger.warning("Model %s returned %d on %s, trying fallback...", curr_model, status, key_bucket.key_env)
-                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
-                    logger.warning("Network error on model %s key %s: %s", curr_model, key_bucket.key_env, net_err)
-                    break
-
-            if resp is None:
-                continue
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key_bucket.api_key}"
 
             try:
+                resp = await self._client.post(url, json=payload)
+                status = resp.status_code
 
                 if status == 200:
                     data = resp.json()
@@ -460,16 +443,36 @@ class GeminiGateway(Gateway):
                     # Parse JSON schema if expected
                     if response_schema and issubclass(response_schema, BaseModel):
                         try:
-                            parsed_json = json.loads(raw_text)
+                            parsed_json = json.loads(raw_text, strict=False)
                             return response_schema.model_validate(parsed_json)
                         except Exception:
+                            pass
+
+                        try:
+                            cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
+                            parsed_json = json.loads(cleaned_text, strict=False)
+                            return response_schema.model_validate(parsed_json)
+                        except Exception:
+                            pass
+
+                        # Robust extraction for PersonaTextReply (e.g. unclosed trailing quotes)
+                        if response_schema is PersonaTextReply:
+                            m = re.search(r'"reply"\s*:\s*"(.*?)(?:"\s*\}|\}\s*$|$)', raw_text, re.DOTALL)
+                            if m:
+                                val = m.group(1).rstrip('"\n }')
+                                return PersonaTextReply(reply=val)
+
+                        # Try repairing unclosed trailing quote before }
+                        if raw_text.rstrip().endswith("}") and not raw_text.rstrip().endswith('"}'):
                             try:
-                                cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
-                                parsed_json = json.loads(cleaned_text)
+                                cand = raw_text.rstrip()[:-1] + '"}'
+                                parsed_json = json.loads(cand, strict=False)
                                 return response_schema.model_validate(parsed_json)
-                            except Exception as e:
-                                logger.error("JSON schema validation failed for '%s': %s (raw: %.100s)", prompt_name, e, raw_text)
-                                return None
+                            except Exception:
+                                pass
+
+                        logger.error("JSON schema validation failed for '%s': (raw: %.100s)", prompt_name, raw_text)
+                        return None
 
                     return raw_text
 
