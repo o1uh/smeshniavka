@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Funny Bot Deployment Script for Raspberry Pi
-# Target directory: /opt/funny-bot
-# Usage: ./deploy.sh [ssh_host_or_alias]
-# Example: ./deploy.sh rpi
+# Funny Bot («Смешнявка») Deployment Script for Raspberry Pi
+# Target directory: /opt/smeshniavka
+# Default host: pi@rpi.ln
+# Default SSH key: ~/.ssh/rpi_router_id_ed25519
 
-RPI_HOST="${1:-rpi}"
-REMOTE_DIR="/opt/funny-bot"
+RPI_HOST="${1:-pi@rpi.ln}"
+SSH_KEY="${2:-$HOME/.ssh/rpi_router_id_ed25519}"
+REMOTE_DIR="/opt/smeshniavka"
 
-echo "=== Деплой Funny Bot на Raspberry Pi (${RPI_HOST}) ==="
+echo "=== Деплой Funny Bot («Смешнявка») на Raspberry Pi (${RPI_HOST}) ==="
 
-# 1. Проверка наличия .env
-if [ ! -f ".env" ]; then
-    echo "⚠️  Файл .env не найден локально! Не забудьте создать его на RPi в ${REMOTE_DIR}/.env."
+SSH_OPTS=()
+if [ -f "${SSH_KEY}" ]; then
+    SSH_OPTS=(-i "${SSH_KEY}")
 fi
 
-# 2. Создание каталога на RPi и настройка прав
-echo "--> Подготовка удаленной директории ${REMOTE_DIR} на ${RPI_HOST}..."
-ssh "${RPI_HOST}" "sudo mkdir -p ${REMOTE_DIR} && sudo chown -R \$(whoami):\$(whoami) ${REMOTE_DIR}"
+# 1. Подготовка удаленного каталога
+echo "--> Подготовка удаленной директории ${REMOTE_DIR}..."
+ssh "${SSH_OPTS[@]}" "${RPI_HOST}" "sudo -n mkdir -p ${REMOTE_DIR} && sudo -n chown -R \$(whoami):\$(whoami) ${REMOTE_DIR}"
 
-# 3. Синхронизация файлов через rsync
-echo "--> Синхронизация файлов..."
-rsync -avz --delete \
+# 2. Синхронизация файлов кодовой базы
+echo "--> Синхронизация файлов кодовой базы в ${REMOTE_DIR}..."
+RSYNC_RSH="ssh"
+if [ -f "${SSH_KEY}" ]; then
+    RSYNC_RSH="ssh -i ${SSH_KEY}"
+fi
+
+rsync -avz --delete -e "${RSYNC_RSH}" \
     --exclude '.venv' \
     --exclude '__pycache__' \
     --exclude '.git' \
@@ -30,42 +36,47 @@ rsync -avz --delete \
     --exclude 'data/*.db' \
     --exclude 'data/*.db-wal' \
     --exclude 'data/*.db-shm' \
+    --exclude 'data/bot.lock' \
     --exclude 'logs/*' \
     --exclude 'reports/*' \
     --exclude 'backups/*' \
     ./ "${RPI_HOST}:${REMOTE_DIR}/"
 
-# 4. Настройка окружения на RPi
-echo "--> Настройка Python и зависимостей на Raspberry Pi..."
-ssh "${RPI_HOST}" bash -s << 'EOF'
+# 3. Подготовка структуры и запуск Docker Compose
+echo "--> Настройка и сборка Docker-контейнера на Raspberry Pi..."
+ssh "${SSH_OPTS[@]}" "${RPI_HOST}" bash -s << 'EOF'
 set -euo pipefail
-cd /opt/funny-bot
+cd /opt/smeshniavka
 
-# Проверка ffmpeg
-if ! command -v ffmpeg &> /dev/null; then
-    echo "Установка ffmpeg..."
-    sudo apt-get update && sudo apt-get install -y ffmpeg python3-venv python3-pip
+# Создание рабочих каталогов с правами 700
+mkdir -p data logs reports backups
+chmod 700 data reports backups
+
+# Если .env еще не создан, создаем шаблон из .env.example
+if [ ! -f ".env" ]; then
+    echo "⚠️  Файл .env не найден на RPi. Создаем шаблон из .env.example..."
+    cp .env.example .env
+    chmod 600 .env
 fi
 
-# Создание виртуального окружения
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+# Сборка Docker образа
+echo "--> Сборка Docker образа smeshniavka..."
+docker compose build
+
+# Если .env заполнен валидным токеном, запускаем контейнер
+if grep -q "1234567890:ABCdef" .env; then
+    echo ""
+    echo "⚠️  ВНИМАНИЕ: Файл .env содержит тестовые заглушки!"
+    echo "Отредактируйте /opt/smeshniavka/.env на RPi, добавив реальный TG_TOKEN и ключи GEMINI_KEY_*."
+    echo "После этого запустите бота:"
+    echo "    cd /opt/smeshniavka && docker compose up -d"
+else
+    echo "--> Запуск контейнера через Docker Compose..."
+    docker compose up -d
+    echo "--> Статус контейнера:"
+    docker compose ps
 fi
-
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
-
-# Проверка dry-run
-.venv/bin/python -m src.main --dry-run
 EOF
 
 echo ""
-echo "=== Код успешно задеплоен на Raspberry Pi! ==="
-echo "Дальнейшие шаги на RPi (${RPI_HOST}):"
-echo "1. Проверьте /opt/funny-bot/.env и ключи: .venv/bin/python -m src.tools.check_keys"
-echo "2. Узнайте ID чата: .venv/bin/python -m src.tools.discover"
-echo "3. Запустите через systemd:"
-echo "   sudo cp /opt/funny-bot/ops/bot.service /etc/systemd/system/funny-bot.service"
-echo "   sudo systemctl daemon-reload"
-echo "   sudo systemctl enable --now funny-bot"
-echo "   sudo systemctl status funny-bot"
+echo "=== Кодовая база синхронизирована и Docker-образ собран на RPi! ==="

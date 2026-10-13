@@ -8,6 +8,12 @@ class ProactiveAction(str, Enum):
     skip = "skip"
 
 
+class PersonaTextReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reply: str
+
+
 class ProactiveDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

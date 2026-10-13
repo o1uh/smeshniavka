@@ -54,6 +54,76 @@ def clean_media_reply_boilerplate(text: str) -> str:
     return "\n".join(cleaned_lines).strip()
 
 
+# Forbidden structural tokens per Point 2: [], {}, <request> or prompt tags
+STRUCTURAL_DUMP_RE = re.compile(
+    r"(\[|\]|\{|\}|<request|<summary|<current|<history|<dossier|<media|<source|```)",
+    re.IGNORECASE
+)
+
+# Section markers and headers
+SECTION_MARKERS_RE = re.compile(
+    r"(#{1,6}\s+|---|===|анализ\s*:|разбор\s*:|режим\s*:|правила\s*:|контекст\s*:|instructions?\s*:|system\s*:|output\s*:)",
+    re.IGNORECASE
+)
+
+# Bullet list detection (dump sign)
+BULLET_LIST_RE = re.compile(
+    r"(^|\n)\s*([-*•]|\d+\.)\s+",
+    re.MULTILINE
+)
+
+
+def validate_persona_reply(
+    reply: str,
+    max_chars: int = 2000,
+    is_media: bool = False
+) -> tuple[bool, Optional[str]]:
+    """
+    Validates persona reply per Point 2 of specification:
+    - 1-3 sentences default, reasonable length
+    - no structural leak tokens: [], {}, <request>, <summary>, etc.
+    - no section markers (###, ---, Анализ:, Правила:, etc.)
+    - no dump indicators:
+      * too many colons (>= 4 colons in a short text)
+      * bullet lists (- / * / 1.)
+      * JSON fences or braces
+    - for media: no forbidden words Исполнитель / Жанр / Правила
+    Returns (is_valid, rejection_reason).
+    """
+    if not reply or not reply.strip():
+        return False, "Empty reply"
+
+    text = reply.strip()
+
+    # 1. Length check
+    if len(text) > max_chars:
+        return False, f"Reply length {len(text)} exceeds limit {max_chars}"
+
+    # 2. Structural tokens: [], {}, <request>, prompt tags, code fences
+    if STRUCTURAL_DUMP_RE.search(text):
+        return False, "Contains structural leak tokens (brackets, braces, prompt tags, or code fences)"
+
+    # 3. Prompt / reasoning leaks (Анализ трека:, Правила поведения:, etc.)
+    if has_persona_leak(text, is_media=is_media):
+        return False, "Contains prompt/reasoning leak or forbidden section headers"
+
+    # 4. Section markers (###, ---, ===, Режим:, etc.)
+    if SECTION_MARKERS_RE.search(text):
+        return False, "Contains section markers (markdown headers, horizontal rules, section titles)"
+
+    # 5. Dump indicators: too many colons (>= 4)
+    if text.count(":") >= 4:
+        return False, "Too many colons (field-value dump sign)"
+
+    # 6. Dump indicators: bullet lists (e.g. - item 1\n- item 2)
+    list_matches = BULLET_LIST_RE.findall(text)
+    if len(list_matches) >= 2:
+        return False, "Contains list formatting (dump sign)"
+
+    return True, None
+
+
+
 
 def sanitize_telegram_html(text: str) -> str:
     """

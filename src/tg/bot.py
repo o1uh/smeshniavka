@@ -16,11 +16,16 @@ from src.ops.log import logger, shadow_logger
 from src.db.manager import DatabaseManager
 from src.db.contracts import TgSender
 from src.gateway.client import GeminiGateway
-from src.context.prompts import PromptBuilder, sanitize_nick, escape_xml
 from src.context.assemble import ContextAssembler
 from src.persona.reply import PingDetector, AuthorSpamLimiter, TgSendQueue
 from src.persona.proactive import ProactiveEngine
-from src.persona.sanitizer import replace_un_aliases, has_persona_leak, clean_media_reply_boilerplate
+from src.persona.sanitizer import (
+    replace_un_aliases,
+    has_persona_leak,
+    clean_media_reply_boilerplate,
+    validate_persona_reply,
+)
+from src.gateway.schemas import PersonaTextReply
 from src.dossier.worker import DossierWorker
 from src.media.analyzer import MediaAnalyzer
 from src.research.search import ResearchModule
@@ -411,50 +416,83 @@ class FunnyBotApp:
 
         # Assemble context
         mode = "media_reply" if media_cache_item else "ping"
+        step2_media_json = None
+        if media_cache_item:
+            # Per Point 3: strictly omit raw transcript and ocr_text to prevent injection propagation!
+            step2_data = {
+                "kind": media_cache_item.get("kind"),
+                "verdict": media_cache_item.get("verdict"),
+                "score100": media_cache_item.get("score100"),
+                "score_reason": media_cache_item.get("score_reason"),
+                "track_meta": media_cache_item.get("track_meta"),
+                "tags": media_cache_item.get("tags"),
+                "unintelligible": media_cache_item.get("unintelligible"),
+                "injection_suspected": media_cache_item.get("injection_suspected"),
+            }
+            step2_media_json = json.dumps(step2_data, ensure_ascii=False)
+
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
             current_msg=msg_dict,
             mode=mode,
-            media_json=json.dumps(media_cache_item, ensure_ascii=False) if media_cache_item else None
+            media_json=step2_media_json
         )
 
         reply_raw = None
         is_media_mode = (mode == "media_reply")
 
-        # Outgoing guard: if leak is detected, drop + 1 retry, do not send
+        # Outgoing guard: if leak or bad parse is detected, drop + 1 repair-retry, do not send raw
         for attempt in range(2):
             res = await self.gateway.generate(
                 prompt_name=f"persona_{mode}",
                 contents=contents,
                 system_instruction=system_instruction,
                 priority="P0",
+                response_schema=PersonaTextReply,
                 estimated_tokens=700
             )
 
-            if not res:
-                break
-
-            if isinstance(res, dict):
+            if isinstance(res, dict) and (res.get("is_degraded") or res.get("is_blocked")):
                 reply_raw = res
                 break
 
-            text_candidate = str(res)
-            if has_persona_leak(text_candidate, is_media=is_media_mode):
+            if isinstance(res, PersonaTextReply):
+                candidate_text = res.reply.strip()
+            elif isinstance(res, str) and res.strip():
+                candidate_text = res.strip()
+            else:
+                logger.warning("Outgoing guard: failed to parse JSON {reply} on attempt %d/2", attempt + 1)
+                if attempt == 0:
+                    continue  # 1 repair retry
+                else:
+                    reply_raw = None
+                    break
+
+            # Validate reply per Point 2
+            is_valid, reject_reason = validate_persona_reply(candidate_text, is_media=is_media_mode)
+            if not is_valid:
                 logger.warning(
-                    "Outgoing guard: detected prompt/metadata leak in persona reply (attempt %d/2): %.80s",
-                    attempt + 1, text_candidate
+                    "Outgoing guard: invalid reply on attempt %d/2: %s (text: %.80s)",
+                    attempt + 1, reject_reason, candidate_text
                 )
                 if attempt == 0:
-                    continue  # Retry generation once
+                    continue  # 1 repair retry
                 else:
-                    logger.warning("Outgoing guard: leak persisted on retry, dropping reply.")
                     reply_raw = None
                     break
             else:
-                reply_raw = text_candidate
+                reply_raw = candidate_text
                 break
 
         if not reply_raw:
+            # Fallback to static degraded excuse instead of sending raw/broken text
+            import random
+            excuse = (
+                random.choice(self.config.persona.degraded_replies)
+                if self.config.persona.degraded_replies
+                else "Башка не варит, позже."
+            )
+            await self.send_queue.enqueue(chat_id, excuse, message.message_id, priority="P0")
             return
 
         if isinstance(reply_raw, dict) and reply_raw.get("is_degraded"):
