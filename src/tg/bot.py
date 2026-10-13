@@ -332,15 +332,24 @@ class FunnyBotApp:
             uptime_min = (time.time() - self.start_time) / 60.0
             key_summary = self.gateway.get_key_status_summary()
             shadow_tag = " [SHADOW]" if self.bot_cfg.SHADOW_MODE else " [LIVE]"
+            bridge_status = "✅ OK" if key_summary.get("bridge_status") == "ok" else "❌ DOWN"
+            bridge_url = key_summary.get("bridge_url", self.bot_cfg.BRIDGE_URL)
             status_text = (
                 f"🤖 <b>Смешнявка</b>{shadow_tag}\n"
                 f"Аптайм: {uptime_min:.1f} мин\n"
                 f"Модель: <code>{self.bot_cfg.MODEL_ID}</code>\n"
-                f"Ключи Gemini: {key_summary['active_keys']} акт / {key_summary['reserve_keys']} рез "
-                f"(кулдаун: {key_summary['in_cooldown']}, мертвых: {key_summary['dead_keys']})\n"
-                f"Дневной RPD: {key_summary['total_rpd_used']} / {key_summary['total_rpd_cap']}"
+                f"Мост Antigravity: {bridge_status} (<code>{bridge_url}</code>)\n"
+                f"Запросов к мосту: {key_summary.get('total_rpd_used', 0)}"
             )
             await message.reply(status_text, parse_mode="HTML")
+            return True
+
+        elif text.startswith("/reset"):
+            ok = await self.gateway.reset_session(f"tg_{message.chat.id}")
+            if ok:
+                await message.reply("Сессия контекста диалога на мосту Antigravity сброшена.")
+            else:
+                await message.reply("Сессия не найдена или уже была очищена.")
             return True
 
         elif text.startswith("/me"):
@@ -455,7 +464,8 @@ class FunnyBotApp:
                 system_instruction=system_instruction,
                 priority="P0",
                 response_schema=PersonaTextReply,
-                estimated_tokens=700
+                estimated_tokens=700,
+                session_id=f"tg_{chat_id}"
             )
 
             if isinstance(res, dict) and (res.get("is_degraded") or res.get("is_blocked")):

@@ -3,52 +3,69 @@ import os
 import sys
 import httpx
 from src.ops.config import load_config
-from src.gateway.client import GeminiGateway
+from src.gateway.client import AntigravityGateway
 
 
-async def check_all_keys() -> None:
-    print("=== Проверка ключей Gemini API ===")
+async def check_all() -> None:
+    print("=== Проверка подключения к Antigravity Bridge ===")
     config = load_config(dry_run=False)
 
-    if not config.keys:
-        print("Внимание: Ни один ключ не найден! Проверьте .env и config/keys.yaml.")
-        return
+    gw = AntigravityGateway(config)
+    resolved_url = await gw._resolve_bridge_url()
 
-    print(f"Всего сконфигурировано ключей: {len(config.keys)}")
+    print(f"Целевой URL моста: {resolved_url}")
     print(f"Целевая модель: {config.bot.MODEL_ID}\n")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        for idx, k in enumerate(config.keys, 1):
-            masked = "****" + k.api_key[-4:] if len(k.api_key) > 4 else "****"
-            role = "РЕЗЕРВНЫЙ" if k.reserve else "АКТИВНЫЙ"
-            proj = f" (проект: {k.project})" if k.project else ""
+        # 1. Health check
+        print("[1] Проверка /health:")
+        try:
+            resp = await client.get(f"{resolved_url}/health")
+            if resp.status_code == 200:
+                data = resp.json()
+                print(f"    Статус: ✅ OK (сервис: {data.get('service')}, uptime: {data.get('uptime_seconds')}с)")
+                print(f"    Модель по умолчанию: {data.get('default_model')}")
+                print(f"    Сессий активно: {data.get('active_sessions')}, warm pool: {data.get('warm_pool_size')}")
+            else:
+                print(f"    Статус: ⚠️ Код ответа {resp.status_code}: {resp.text[:100]}")
+        except Exception as e:
+            print(f"    Статус: ❌ Ошибка подключения к мосту: {e}")
+            return
 
-            print(f"[{idx}] {k.key_env} ({masked}) [{role}]{proj}:")
-            print(f"    Лимиты: RPM={k.rpm_limit}, RPD={k.rpd_limit}, TPM={k.tpm_limit}")
+        # 2. Models list
+        print("\n[2] Доступные модели (/v1/models):")
+        try:
+            resp = await client.get(f"{resolved_url}/v1/models")
+            if resp.status_code == 200:
+                models = resp.json().get("data", [])
+                print(f"    Всего моделей/алиасов: {len(models)}")
+                for m in models[:6]:
+                    fast_tag = "⚡ FAST" if m.get("is_fast") else "  SLOW"
+                    print(f"    [{fast_tag}] {m['id']:<24} -> {m.get('description', '')[:45]}")
+            else:
+                print(f"    Статус: ⚠️ Код ответа {resp.status_code}")
+        except Exception as e:
+            print(f"    Ошибка: {e}")
 
-            # Test API request
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.bot.MODEL_ID}?key={k.api_key}"
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    disp_name = data.get("displayName", "OK")
-                    print(f"    Статус: ✅ РАБОТАЕТ ({disp_name})")
-                elif resp.status_code in (401, 403):
-                    print(f"    Статус: ❌ ОШИБКА АВТОРИЗАЦИИ ({resp.status_code}) — неверный ключ или квота заблокирована!")
-                elif resp.status_code == 429:
-                    print(f"    Статус: ⚠️ КВОТА ИСЧЕРПАНА (429 Rate Limit)!")
-                else:
-                    print(f"    Статус: ⚠️ Код ответа {resp.status_code}: {resp.text[:80]}")
-            except Exception as e:
-                print(f"    Статус: ❌ Ошибка подключения: {e}")
-            print()
+        # 3. Test generation through Gateway
+        print("\n[3] Тестовая генерация ответа через Gateway:")
+        try:
+            test_contents = [{"role": "user", "parts": [{"text": "Скажи привет одним коротким предложением."}]}]
+            answer = await gw.generate(
+                prompt_name="test_check",
+                contents=test_contents,
+                priority="P0",
+                estimated_tokens=50
+            )
+            print(f"    Ответ от Antigravity Bridge: ✅ {answer.strip() if isinstance(answer, str) else answer}")
+        except Exception as e:
+            print(f"    ❌ Ошибка генерации: {e}")
 
-    print("=== Проверка завершена ===")
+    print("\n=== Проверка завершена ===")
 
 
 def main():
-    asyncio.run(check_all_keys())
+    asyncio.run(check_all())
 
 
 if __name__ == "__main__":

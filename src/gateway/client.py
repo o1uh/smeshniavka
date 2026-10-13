@@ -1,12 +1,10 @@
 import asyncio
 import copy
-import hashlib
 import json
+import os
 import re
 import time
-from datetime import datetime
 from typing import Any, Optional, Union
-from zoneinfo import ZoneInfo
 import httpx
 from pydantic import BaseModel
 
@@ -17,88 +15,38 @@ from src.gateway.schemas import PersonaTextReply
 
 
 class KeyBucket:
-    """Tracks RPM, RPD, TPM and cooldown state for a key or project."""
+    """
+    Backward-compatibility stub for legacy KeyBucket tracking.
+    With Antigravity Fast Bridge, individual API keys and quotas are replaced by the bridge.
+    """
 
-    def __init__(self, key_config: KeyConfig):
-        self.key_env = key_config.key_env
-        self.api_key = key_config.api_key
-        self.rpm_limit = key_config.rpm_limit
-        self.rpd_limit = key_config.rpd_limit
-        self.tpm_limit = key_config.tpm_limit
-        self.project = key_config.project or key_config.key_env
-        self.reserve = key_config.reserve
+    def __init__(self, key_config: Optional[KeyConfig] = None):
+        self.key_env = getattr(key_config, "key_env", "ANTIGRAVITY_BRIDGE")
+        self.api_key = getattr(key_config, "api_key", "bridge_key")
+        self.rpm_limit = getattr(key_config, "rpm_limit", 120)
+        self.rpd_limit = getattr(key_config, "rpd_limit", 50000)
+        self.tpm_limit = getattr(key_config, "tpm_limit", 10000000)
+        self.project = getattr(key_config, "project", "antigravity") or "antigravity"
+        self.reserve = getattr(key_config, "reserve", False)
 
-        self.key_hash = hashlib.sha256(self.api_key.encode()).hexdigest()[:12]
-        self.is_dead = False  # 401 or 403
+        self.key_hash = "bridge"
+        self.is_dead = False
         self.cooldown_until: float = 0.0
-        self.minute_429_count: int = 0
-
-        # Usage tracking
         self.rpd_used: int = 0
-        self.last_pt_date: str = ""
-        self.request_timestamps: list[float] = []
-        self.token_timestamps: list[tuple[float, int]] = []
 
-    def check_reset_pt(self, now_pt_date: str) -> None:
-        """Resets daily counter at midnight Pacific Time."""
-        if self.last_pt_date != now_pt_date:
-            self.last_pt_date = now_pt_date
-            self.rpd_used = 0
-            self.minute_429_count = 0
-            # If cooldown was daily, clear it
-            if self.cooldown_until > time.time() and self.minute_429_count > 2:
-                self.cooldown_until = 0.0
-
-    def prune_sliding_windows(self, now: float) -> None:
-        cutoff = now - 60.0
-        self.request_timestamps = [t for t in self.request_timestamps if t > cutoff]
-        self.token_timestamps = [item for item in self.token_timestamps if item[0] > cutoff]
-
-    def current_rpm(self, now: float) -> int:
-        self.prune_sliding_windows(now)
-        return len(self.request_timestamps)
-
-    def current_tpm(self, now: float) -> int:
-        self.prune_sliding_windows(now)
-        return sum(item[1] for item in self.token_timestamps)
-
-    def is_in_cooldown(self, now: float) -> bool:
+    def is_in_cooldown(self, now: float = 0.0) -> bool:
         return self.is_dead or (self.cooldown_until > now)
 
-    def can_accept(self, priority: str, estimated_tokens: int, rpm_p0_reserve: int, now: float) -> bool:
-        if self.is_in_cooldown(now):
-            return False
+    def current_rpm(self, now: float = 0.0) -> int:
+        return 0
 
-        # Daily limit check (if rpd_limit > 0)
-        if self.rpd_limit > 0 and self.rpd_used >= self.rpd_limit:
-            return False
-
-        # RPM check
-        rpm = self.current_rpm(now)
-        available_rpm = self.rpm_limit - rpm
-        if priority != "P0":
-            if available_rpm <= rpm_p0_reserve:
-                return False
-        else:
-            if available_rpm <= 0:
-                return False
-
-        # TPM check
-        tpm = self.current_tpm(now)
-        if (tpm + estimated_tokens) > self.tpm_limit:
-            return False
-
-        return True
-
-    def record_usage(self, estimated_tokens: int, now: float) -> None:
-        self.request_timestamps.append(now)
-        self.token_timestamps.append((now, estimated_tokens))
-        self.rpd_used += 1
+    def current_tpm(self, now: float = 0.0) -> int:
+        return 0
 
 
 def clean_schema_for_gemini(raw_schema: dict) -> dict:
     """
-    Cleans Pydantic JSON schema for Google Gemini REST API:
+    Cleans Pydantic JSON schema:
     - Inlines all $ref definitions from $defs
     - Removes $defs, additionalProperties, title, $schema, default
     - Converts anyOf: [{type: T}, {type: null}] to nullable: true
@@ -132,23 +80,85 @@ def clean_schema_for_gemini(raw_schema: dict) -> dict:
     return resolve(schema)
 
 
-class GeminiGateway(Gateway):
+def convert_contents_to_messages(
+    contents: list[dict[str, Any]],
+    system_instruction: Optional[str] = None
+) -> list[dict[str, Any]]:
     """
-    Production-grade Gemini Gateway:
-    - Multi-key rotation with priority P0/P1/P2
-    - Immediate 429 failover to next key
-    - Midnight PT quota resets
-    - Concurrency control (MAX_CONCURRENT=4, P0 reserve, P2 <= 1)
-    - 60s timeout with guaranteed slot release
-    - DEGRADED mode notification when all keys are down
-    - Structured Pydantic outputs with schema validation
+    Converts Gemini-style contents and system instruction into OpenAI-compatible chat messages
+    understood by the Antigravity Fast Bridge.
+    """
+    messages: list[dict[str, Any]] = []
+
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+
+    for item in contents:
+        role = "assistant" if item.get("role") in ("model", "assistant") else "user"
+        parts = item.get("parts")
+
+        if parts is not None:
+            text_blocks: list[str] = []
+            structured_blocks: list[dict[str, Any]] = []
+            has_media = False
+
+            for part in parts:
+                if isinstance(part, dict):
+                    if "text" in part:
+                        t = part["text"]
+                        text_blocks.append(t)
+                        structured_blocks.append({"type": "text", "text": t})
+                    elif "inline_data" in part:
+                        has_media = True
+                        inline = part["inline_data"]
+                        mime = inline.get("mime_type", "")
+                        data = inline.get("data", "")
+                        if mime.startswith("image/"):
+                            structured_blocks.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{data}"}
+                            })
+                        else:
+                            structured_blocks.append({
+                                "type": "text",
+                                "text": f"\n[Прикрепленный медиафайл: mime={mime}]\n"
+                            })
+                elif isinstance(part, str):
+                    text_blocks.append(part)
+                    structured_blocks.append({"type": "text", "text": part})
+
+            if has_media:
+                messages.append({"role": role, "content": structured_blocks})
+            else:
+                messages.append({"role": role, "content": "\n".join(text_blocks)})
+
+        elif "content" in item:
+            messages.append({"role": role, "content": item["content"]})
+
+    return messages
+
+
+class AntigravityGateway(Gateway):
+    """
+    Gateway connecting to Antigravity Fast Bridge on Raspberry Pi (/opt/bridge).
+    Replaces multi-key rotation and direct Gemini API rate limits with the
+    high-performance local bridge.
+    - OpenAI-compatible chat completions interface
+    - Persistent session support for low latency (<2s per turn)
+    - Concurrency control (MAX_CONCURRENT=4, P0 reserve, P2 slot limits)
+    - Automatic URL discovery (localhost vs rpi.ln)
+    - Full support for Pydantic response schemas with automatic repair
     """
 
     def __init__(self, app_config: AppConfig, http_client: Optional[httpx.AsyncClient] = None):
         self.config = app_config
         self.bot_config = app_config.bot
-        self.keys = [KeyBucket(k) for k in app_config.keys]
-        self._client = http_client or httpx.AsyncClient(timeout=60.0)
+        configured_url = getattr(self.bot_config, "BRIDGE_URL", None) or os.getenv("BRIDGE_URL", "http://127.0.0.1:8000")
+        self.bridge_url = configured_url.rstrip("/")
+        self._client = http_client or httpx.AsyncClient(timeout=90.0)
+
+        self._active_url: Optional[str] = None
+        self._url_lock = asyncio.Lock()
 
         # Concurrency & priorities
         self.max_concurrent = self.bot_config.MAX_CONCURRENT
@@ -156,135 +166,104 @@ class GeminiGateway(Gateway):
         self._current_p2 = 0
         self._lock = asyncio.Lock()
 
-        # Shared project buckets (keys with the same project share limits)
-        self.project_buckets: dict[str, KeyBucket] = {}
-        for k in self.keys:
-            if k.project not in self.project_buckets:
-                self.project_buckets[k.project] = k
-
-        # Alert callback for down keys
-        self.all_keys_down_since: Optional[float] = None
+        # Monitoring & status metrics
+        self.is_healthy = True
+        self.requests_count = 0
+        self.total_tokens_used = 0
+        self.last_error: Optional[str] = None
+        self.down_since: Optional[float] = None
         self.alert_callback = None
 
-    def _get_pt_date_str(self) -> str:
-        pt_dt = datetime.now(ZoneInfo("America/Los_Angeles"))
-        return pt_dt.strftime("%Y-%m-%d")
+        # Compatibility stub for keys
+        self.keys = [KeyBucket()]
 
-    def _sync_all_buckets(self) -> None:
-        now_pt = self._get_pt_date_str()
-        for k in self.keys:
-            k.check_reset_pt(now_pt)
+    async def _resolve_bridge_url(self) -> str:
+        """
+        Determines reachable bridge URL. If default http://127.0.0.1:8000 fails to connect,
+        probes http://rpi.ln:8000 (LAN hostname of Raspberry Pi).
+        """
+        if self._active_url:
+            return self._active_url
+
+        async with self._url_lock:
+            if self._active_url:
+                return self._active_url
+
+            # If user explicitly configured a non-default URL, use it directly
+            if self.bridge_url != "http://127.0.0.1:8000":
+                self._active_url = self.bridge_url
+                return self._active_url
+
+            # Try default localhost
+            try:
+                resp = await self._client.get(f"{self.bridge_url}/health", timeout=2.0)
+                if resp.status_code == 200:
+                    self._active_url = self.bridge_url
+                    return self._active_url
+            except Exception:
+                pass
+
+            # Fallback probe to rpi.ln (Raspberry Pi on local network)
+            lan_url = "http://rpi.ln:8000"
+            try:
+                resp = await self._client.get(f"{lan_url}/health", timeout=2.5)
+                if resp.status_code == 200:
+                    logger.info("Antigravity Bridge discovered at %s", lan_url)
+                    self._active_url = lan_url
+                    return self._active_url
+            except Exception:
+                pass
+
+            # Default to configured URL
+            self._active_url = self.bridge_url
+            return self._active_url
+
+    def _resolve_model(self, model_id: str) -> str:
+        """Maps legacy Gemini model identifiers to bridge models/aliases."""
+        if not model_id:
+            return "fast"
+        m = model_id.strip()
+        if m in ("gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"):
+            return "fast"
+        return m
 
     def get_key_status_summary(self) -> dict[str, Any]:
-        """Provides status for all keys (for monitoring / /alive command)."""
-        self._sync_all_buckets()
+        """Provides status summary compatible with /alive and /status bot commands."""
         now = time.time()
-        active = [k for k in self.keys if not k.reserve and not k.is_dead]
-        reserve = [k for k in self.keys if k.reserve and not k.is_dead]
-        in_cooldown = [k for k in self.keys if k.is_in_cooldown(now) and not k.is_dead]
-        dead = [k for k in self.keys if k.is_dead]
-
-        total_rpd_cap = sum(k.rpd_limit for k in active if k.rpd_limit > 0)
-        total_rpd_used = sum(k.rpd_used for k in active)
+        active_cnt = 1 if self.is_healthy else 0
+        in_cooldown_cnt = 0 if self.is_healthy else 1
 
         return {
-            "total_keys": len(self.keys),
-            "active_keys": len(active),
-            "reserve_keys": len(reserve),
-            "in_cooldown": len(in_cooldown),
-            "dead_keys": len(dead),
-            "total_rpd_cap": total_rpd_cap,
-            "total_rpd_used": total_rpd_used,
-            "is_degraded": len(in_cooldown) == (len(active) + len(reserve)),
+            "total_keys": 1,
+            "active_keys": active_cnt,
+            "reserve_keys": 0,
+            "in_cooldown": in_cooldown_cnt,
+            "dead_keys": in_cooldown_cnt,
+            "total_rpd_cap": 999999,
+            "total_rpd_used": self.requests_count,
+            "is_degraded": not self.is_healthy,
+            "bridge_url": self._active_url or self.bridge_url,
+            "bridge_status": "ok" if self.is_healthy else "down",
+            "last_error": self.last_error,
         }
 
-    def _check_budget(self, priority: str) -> bool:
-        """Checks daily budget for P1 and P2 based on active non-reserve keys."""
-        active_keys = [k for k in self.keys if not k.reserve and not k.is_dead]
-        if not active_keys:
-            return False
-
-        total_limit = sum(k.rpd_limit for k in active_keys if k.rpd_limit > 0)
-        if total_limit == 0:
-            return True  # Unlimited
-
-        total_used = sum(k.rpd_used for k in active_keys)
-        pct = (total_used / total_limit) * 100.0
-
-        if priority == "P2" and pct >= self.bot_config.BUDGET_P2_MAX:
-            logger.info("P2 budget exceeded (%.1f%% >= %d%%)", pct, self.bot_config.BUDGET_P2_MAX)
-            return False
-        if priority == "P1" and pct >= self.bot_config.BUDGET_P1_MAX:
-            logger.info("P1 budget exceeded (%.1f%% >= %d%%)", pct, self.bot_config.BUDGET_P1_MAX)
-            return False
-        return True
-
-    def _select_available_key(self, priority: str, estimated_tokens: int) -> Optional[KeyBucket]:
-        self._sync_all_buckets()
-        now = time.time()
-        reserve_reserve_rpm = self.bot_config.RPM_P0_RESERVE
-
-        # 1. Try active keys first
-        active_candidates = [
-            k for k in self.keys
-            if not k.reserve and k.can_accept(priority, estimated_tokens, reserve_reserve_rpm, now)
-        ]
-        if active_candidates:
-            # Pick the key with least used RPD / RPM
-            return min(active_candidates, key=lambda k: (k.rpd_used, k.current_rpm(now)))
-
-        # 2. If P0 and active keys are in cooldown / exhausted, try reserve keys
-        if priority == "P0":
-            reserve_candidates = [
-                k for k in self.keys
-                if k.reserve and k.can_accept(priority, estimated_tokens, 0, now)
-            ]
-            if reserve_candidates:
-                return min(reserve_candidates, key=lambda k: (k.rpd_used, k.current_rpm(now)))
-
-        return None
-
-    def _mark_key_cooldown(self, key_bucket: KeyBucket, error_type: str, retry_delay: Optional[float] = None) -> None:
-        now = time.time()
-        if error_type == "RATE_DAILY":
-            # Cooldown until midnight PT
-            pt_now = datetime.now(ZoneInfo("America/Los_Angeles"))
-            midnight_pt = pt_now.replace(hour=23, minute=59, second=59).timestamp()
-            key_bucket.cooldown_until = midnight_pt + 60.0
-            logger.warning("Key %s hit daily quota limit! Cooldown until PT midnight", key_bucket.key_env)
-        elif error_type == "RATE_MINUTE":
-            key_bucket.minute_429_count += 1
-            if retry_delay and retry_delay > 0:
-                cooldown_sec = retry_delay
-            elif key_bucket.minute_429_count == 1:
-                cooldown_sec = 60.0
-            elif key_bucket.minute_429_count == 2:
-                cooldown_sec = 300.0  # 5 min
-            else:
-                # Escalate to PT midnight
-                pt_now = datetime.now(ZoneInfo("America/Los_Angeles"))
-                cooldown_sec = max(600.0, pt_now.replace(hour=23, minute=59, second=59).timestamp() - now)
-
-            key_bucket.cooldown_until = now + cooldown_sec
-            logger.warning(
-                "Key %s hit minute rate limit (attempt %d)! Cooldown %.0fs",
-                key_bucket.key_env, key_bucket.minute_429_count, cooldown_sec
+    async def reset_session(self, session_id: str) -> bool:
+        """Resets persistent session worker in Antigravity Bridge."""
+        url = await self._resolve_bridge_url()
+        try:
+            resp = await self._client.post(
+                f"{url}/v1/sessions/reset",
+                json={"session_id": session_id},
+                timeout=5.0
             )
-        elif error_type in ("AUTH_ERROR", "INVALID_KEY"):
-            key_bucket.is_dead = True
-            logger.error("Key %s invalid or unauthorized (401/403)! Marked DEAD", key_bucket.key_env)
-        elif error_type in ("SERVER_5XX", "TIMEOUT"):
-            key_bucket.cooldown_until = now + 60.0
-            logger.warning("Key %s hit %s! Temporary cooldown 60s", key_bucket.key_env, error_type)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.warning("Failed to reset session %s on bridge: %s", session_id, e)
+            return False
 
     async def _acquire_slot(self, priority: str) -> bool:
         while True:
             async with self._lock:
-                # Slot conditions:
-                # 1. Total active < max_concurrent
-                # 2. P0 always allowed if total < max_concurrent
-                # 3. Non-P0 cannot consume the last slot (reserve 1 slot for P0)
-                # 4. P2 cannot exceed 1 concurrent slot
                 available_slots = self.max_concurrent - self._current_total
                 if priority == "P0":
                     if available_slots > 0:
@@ -315,38 +294,49 @@ class GeminiGateway(Gateway):
         priority: str = "P0",
         response_schema: Optional[type] = None,
         estimated_tokens: int = 1000,
-        enable_search: bool = False
+        enable_search: bool = False,
+        session_id: Optional[str] = None
     ) -> Any:
         """
-        Executes generation with concurrency slot, key rotation, and immediate failover.
+        Executes generation via Antigravity Fast Bridge.
         """
-        # 1. Budget check for P1 / P2
-        if not self._check_budget(priority):
-            return None
-
-        # 2. Acquire concurrency slot
         await self._acquire_slot(priority)
-
         try:
             return await asyncio.wait_for(
-                self._execute_with_rotation(
+                self._execute(
                     prompt_name=prompt_name,
                     contents=contents,
                     system_instruction=system_instruction,
                     priority=priority,
                     response_schema=response_schema,
                     estimated_tokens=estimated_tokens,
-                    enable_search=enable_search
+                    enable_search=enable_search,
+                    session_id=session_id
                 ),
-                timeout=60.0
+                timeout=75.0
             )
         except asyncio.TimeoutError:
-            logger.error("Gemini gateway call '%s' timed out after 60s", prompt_name)
+            logger.error("Bridge call '%s' timed out after 75s", prompt_name)
+            self._mark_failure("TIMEOUT")
+            if priority == "P0":
+                return {"is_degraded": True}
             return None
         finally:
             await self._release_slot(priority)
 
-    async def _execute_with_rotation(
+    def _mark_failure(self, error_desc: str) -> None:
+        self.is_healthy = False
+        self.last_error = error_desc
+        if not self.down_since:
+            self.down_since = time.time()
+        logger.warning("Antigravity Bridge marked unhealthy: %s", error_desc)
+
+    def _mark_success(self) -> None:
+        self.is_healthy = True
+        self.down_since = None
+        self.last_error = None
+
+    async def _execute(
         self,
         prompt_name: str,
         contents: list[dict[str, Any]],
@@ -354,157 +344,132 @@ class GeminiGateway(Gateway):
         priority: str,
         response_schema: Optional[type],
         estimated_tokens: int,
-        enable_search: bool
+        enable_search: bool,
+        session_id: Optional[str]
     ) -> Any:
-        attempted_keys = set()
-        model_id = self.bot_config.MODEL_ID
-
-        # Prepare generation config from config/gen.yaml
         gen_params = self.config.gen.get(prompt_name, {})
-        temperature = gen_params.get("temperature", 1.0)
+        temperature = gen_params.get("temperature", 0.7)
         max_output_tokens = gen_params.get("max_output_tokens", 700)
 
-        generation_config: dict[str, Any] = {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-        }
+        # Convert contents to OpenAI chat completion format
+        messages = convert_contents_to_messages(contents, system_instruction)
 
-        if response_schema:
-            generation_config["responseMimeType"] = "application/json"
-
-        # Safety settings: All 4 OFF per R9
-        safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
+        target_model = self._resolve_model(self.bot_config.MODEL_ID)
 
         payload: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": generation_config,
-            "safetySettings": safety_settings,
+            "model": target_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_output_tokens,
+            "stream": False,
         }
 
-        if system_instruction:
-            payload["systemInstruction"] = {
-                "parts": [{"text": system_instruction}]
-            }
+        if session_id:
+            payload["user"] = session_id
 
-        if enable_search:
-            payload["tools"] = [{"googleSearch": {}}]
+        bridge_url = await self._resolve_bridge_url()
+        endpoint = f"{bridge_url}/v1/chat/completions"
 
-        # Rotation loop
-        while True:
-            key_bucket = self._select_available_key(priority, estimated_tokens)
-            if not key_bucket or key_bucket.key_hash in attempted_keys:
-                # All keys in cooldown or unavailable!
+        try:
+            resp = await self._client.post(endpoint, json=payload, timeout=60.0)
+            status = resp.status_code
+
+            if status == 200:
+                self._mark_success()
+                self.requests_count += 1
+
+                data = resp.json()
+                usage = data.get("usage", {})
+                self.total_tokens_used += usage.get("total_tokens", 0)
+
+                choices = data.get("choices", [])
+                if not choices:
+                    logger.warning("Empty choices returned from Antigravity Bridge")
+                    return {"is_blocked": True}
+
+                choice = choices[0]
+                message_obj = choice.get("message", {})
+                raw_text = message_obj.get("content", "")
+
+                if choice.get("finish_reason") in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
+                    logger.warning("Generation blocked by safety filter")
+                    return {"is_blocked": True}
+
+                # Parse JSON schema if expected
+                if response_schema and issubclass(response_schema, BaseModel):
+                    try:
+                        parsed_json = json.loads(raw_text, strict=False)
+                        return response_schema.model_validate(parsed_json)
+                    except Exception:
+                        pass
+
+                    try:
+                        cleaned_text = re.sub(
+                            r"^```(?:json)?\s*|\s*```$",
+                            "",
+                            raw_text.strip(),
+                            flags=re.MULTILINE
+                        )
+                        parsed_json = json.loads(cleaned_text, strict=False)
+                        return response_schema.model_validate(parsed_json)
+                    except Exception:
+                        pass
+
+                    # Robust extraction for PersonaTextReply (e.g. unclosed trailing quotes)
+                    if response_schema is PersonaTextReply:
+                        m = re.search(r'"reply"\s*:\s*"(.*?)(?:"\s*\}|\}\s*$|$)', raw_text, re.DOTALL)
+                        if m:
+                            val = m.group(1).rstrip('"\n }')
+                            return PersonaTextReply(reply=val)
+
+                    # Try regex pattern matching first JSON object {...}
+                    m_json = re.search(r"(\{.*\})", raw_text, re.DOTALL)
+                    if m_json:
+                        try:
+                            parsed_json = json.loads(m_json.group(1), strict=False)
+                            return response_schema.model_validate(parsed_json)
+                        except Exception:
+                            pass
+
+                    # Try repairing unclosed trailing quote before }
+                    if raw_text.rstrip().endswith("}") and not raw_text.rstrip().endswith('"}'):
+                        try:
+                            cand = raw_text.rstrip()[:-1] + '"}'
+                            parsed_json = json.loads(cand, strict=False)
+                            return response_schema.model_validate(parsed_json)
+                        except Exception:
+                            pass
+
+                    logger.error(
+                        "JSON schema validation failed for '%s': (raw: %.100s)",
+                        prompt_name, raw_text
+                    )
+                    return None
+
+                return raw_text
+
+            else:
+                err_msg = f"HTTP {status}: {resp.text[:200]}"
+                logger.warning("Antigravity Bridge returned error: %s", err_msg)
+                self._mark_failure(err_msg)
                 if priority == "P0":
-                    logger.warning("DEGRADED: All keys in cooldown/exhausted for P0 request '%s'", prompt_name)
                     return {"is_degraded": True}
-                else:
-                    logger.info("All keys in cooldown for %s request '%s'", priority, prompt_name)
-                    return None
-
-            attempted_keys.add(key_bucket.key_hash)
-            now = time.time()
-            key_bucket.record_usage(estimated_tokens, now)
-
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key_bucket.api_key}"
-
-            try:
-                resp = await self._client.post(url, json=payload, timeout=12.0)
-                status = resp.status_code
-
-                if status == 200:
-                    data = resp.json()
-
-                    # Check for prompt-level block
-                    prompt_feedback = data.get("promptFeedback", {})
-                    if prompt_feedback.get("blockReason"):
-                        logger.warning("Prompt BLOCKED by Gemini filter: %s", prompt_feedback)
-                        return {"is_blocked": True}
-
-                    candidates = data.get("candidates", [])
-                    if not candidates:
-                        logger.warning("Empty candidates returned (potential filter block)")
-                        return {"is_blocked": True}
-
-                    candidate = candidates[0]
-                    finish_reason = candidate.get("finishReason")
-                    if finish_reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
-                        logger.warning("Candidate BLOCKED by finishReason: %s", finish_reason)
-                        return {"is_blocked": True}
-
-                    content = candidate.get("content", {})
-                    parts = content.get("parts", [])
-                    if not parts:
-                        return {"is_blocked": True}
-
-                    raw_text = parts[0].get("text", "")
-
-                    # Parse JSON schema if expected
-                    if response_schema and issubclass(response_schema, BaseModel):
-                        try:
-                            parsed_json = json.loads(raw_text, strict=False)
-                            return response_schema.model_validate(parsed_json)
-                        except Exception:
-                            pass
-
-                        try:
-                            cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
-                            parsed_json = json.loads(cleaned_text, strict=False)
-                            return response_schema.model_validate(parsed_json)
-                        except Exception:
-                            pass
-
-                        # Robust extraction for PersonaTextReply (e.g. unclosed trailing quotes)
-                        if response_schema is PersonaTextReply:
-                            m = re.search(r'"reply"\s*:\s*"(.*?)(?:"\s*\}|\}\s*$|$)', raw_text, re.DOTALL)
-                            if m:
-                                val = m.group(1).rstrip('"\n }')
-                                return PersonaTextReply(reply=val)
-
-                        # Try repairing unclosed trailing quote before }
-                        if raw_text.rstrip().endswith("}") and not raw_text.rstrip().endswith('"}'):
-                            try:
-                                cand = raw_text.rstrip()[:-1] + '"}'
-                                parsed_json = json.loads(cand, strict=False)
-                                return response_schema.model_validate(parsed_json)
-                            except Exception:
-                                pass
-
-                        logger.error("JSON schema validation failed for '%s': (raw: %.100s)", prompt_name, raw_text)
-                        return None
-
-                    return raw_text
-
-                elif status == 429:
-                    # Rate limit error: parse PerMinute vs PerDay
-                    resp_body = resp.text
-                    is_daily = "PerDay" in resp_body or "quota exceeded per day" in resp_body.lower()
-                    error_type = "RATE_DAILY" if is_daily else "RATE_MINUTE"
-                    self._mark_key_cooldown(key_bucket, error_type)
-                    # Immediate retry with next key in rotation!
-                    continue
-
-                elif status in (401, 403):
-                    self._mark_key_cooldown(key_bucket, "AUTH_ERROR")
-                    continue
-
-                elif status >= 500:
-                    logger.warning("Gemini 5xx server error (%d) on key %s", status, key_bucket.key_env)
-                    self._mark_key_cooldown(key_bucket, "SERVER_5XX")
-                    continue
-
-                else:
-                    logger.error("Gemini unexpected error %d: %s", status, resp.text)
-                    return None
-
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.TimeoutException) as net_err:
-                logger.warning("Network/Timeout error on key %s: %s", key_bucket.key_env, net_err)
-                self._mark_key_cooldown(key_bucket, "TIMEOUT")
-                continue
-            except Exception as e:
-                logger.error("Unexpected exception during Gemini call: %s", e)
                 return None
+
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.TimeoutException) as net_err:
+            err_msg = f"Network error connecting to bridge ({bridge_url}): {net_err}"
+            logger.warning(err_msg)
+            self._mark_failure(err_msg)
+            if priority == "P0":
+                return {"is_degraded": True}
+            return None
+        except Exception as e:
+            logger.error("Unexpected exception during bridge call: %s", e)
+            self._mark_failure(str(e))
+            if priority == "P0":
+                return {"is_degraded": True}
+            return None
+
+
+# Backward-compatible alias
+GeminiGateway = AntigravityGateway

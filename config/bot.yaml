@@ -3,7 +3,8 @@
 
 ALLOWED_CHAT_ID: 0 # ID целевого чата из discover (отрицательный для супергрупп)
 OWNER_IDS: []      # ID владельцев бота (также могут быть заданы через env OWNER_IDS=123,456)
-MODEL_ID: "gemini-3.5-flash-lite" # Обязателен, без дефолта
+MODEL_ID: "fast"   # Быстрейшая модель через Antigravity Fast Bridge (алиас gemini-3.8-flash-low)
+BRIDGE_URL: "http://127.0.0.1:8000" # URL моста на RPi (или http://rpi.ln:8000 при внешнем запуске)
 TZ: "Asia/Novosibirsk"
 BOT_ALIASES: ["смешняв", "смешнявка"]
 SAFETY: "all OFF"

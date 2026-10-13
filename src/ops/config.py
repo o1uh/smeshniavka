@@ -53,7 +53,8 @@ class MediaProbabilities(BaseModel):
 class BotConfig(BaseModel):
     ALLOWED_CHAT_ID: int = 0
     OWNER_IDS: list[int] = Field(default_factory=list)
-    MODEL_ID: str
+    MODEL_ID: str = "fast"
+    BRIDGE_URL: str = "http://127.0.0.1:8000"
     TZ: str = "Asia/Novosibirsk"
     BOT_ALIASES: list[str] = Field(default_factory=lambda: ["смешняв", "смешнявка"])
     SAFETY: str = "all OFF"
@@ -174,7 +175,7 @@ class PersonaConfig(BaseModel):
 class AppConfig(BaseModel):
     bot: BotConfig
     persona: PersonaConfig
-    keys: list[KeyConfig]
+    keys: list[KeyConfig] = Field(default_factory=list)
     limits: dict[str, Any]
     gen: dict[str, Any]
     tg_token: str = ""
@@ -206,11 +207,11 @@ def load_config(
     """
     Loads all configuration files and environment secrets:
     1. Reads .env (or environment variables)
-    2. Reads config/bot.yaml (MODEL_ID is required)
+    2. Reads config/bot.yaml (MODEL_ID, BRIDGE_URL)
     3. Reads config/persona.yaml
     4. Reads config/limits.yaml
     5. Reads config/gen.yaml
-    6. Loads and validates Gemini keys from keys.yaml + env auto-discovery
+    6. Loads and validates Gemini keys from keys.yaml + env auto-discovery (optional)
     """
     config_path = Path(config_dir)
     env_vars = load_env_file(Path(env_file))
@@ -235,6 +236,11 @@ def load_config(
                 parsed_owners.append(int(p))
         if parsed_owners:
             bot_raw["OWNER_IDS"] = parsed_owners
+
+    # Merge BRIDGE_URL from env if available
+    env_bridge = env_vars.get("BRIDGE_URL", "").strip()
+    if env_bridge:
+        bot_raw["BRIDGE_URL"] = env_bridge
 
     bot_config = BotConfig(**bot_raw)
 

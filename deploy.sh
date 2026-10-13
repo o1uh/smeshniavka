@@ -30,6 +30,7 @@ fi
 
 rsync -avz --delete -e "${RSYNC_RSH}" \
     --exclude '.venv' \
+    --exclude '.env' \
     --exclude '__pycache__' \
     --exclude '.git' \
     --exclude '.pytest_cache' \
@@ -67,7 +68,7 @@ docker compose build
 if grep -q "1234567890:ABCdef" .env; then
     echo ""
     echo "⚠️  ВНИМАНИЕ: Файл .env содержит тестовые заглушки!"
-    echo "Отредактируйте /opt/smeshniavka/.env на RPi, добавив реальный TG_TOKEN и ключи GEMINI_KEY_*."
+    echo "Отредактируйте /opt/smeshniavka/.env на RPi, добавив реальный TG_TOKEN (мост Antigravity используется автоматически)."
     echo "После этого запустите бота:"
     echo "    cd /opt/smeshniavka && docker compose up -d"
 else
