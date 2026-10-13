@@ -20,7 +20,7 @@ from src.context.prompts import PromptBuilder, sanitize_nick, escape_xml
 from src.context.assemble import ContextAssembler
 from src.persona.reply import PingDetector, AuthorSpamLimiter, TgSendQueue
 from src.persona.proactive import ProactiveEngine
-from src.persona.sanitizer import replace_un_aliases
+from src.persona.sanitizer import replace_un_aliases, has_persona_leak, clean_media_reply_boilerplate
 from src.dossier.worker import DossierWorker
 from src.media.analyzer import MediaAnalyzer
 from src.research.search import ResearchModule
@@ -418,13 +418,41 @@ class FunnyBotApp:
             media_json=json.dumps(media_cache_item, ensure_ascii=False) if media_cache_item else None
         )
 
-        reply_raw = await self.gateway.generate(
-            prompt_name=f"persona_{mode}",
-            contents=contents,
-            system_instruction=system_instruction,
-            priority="P0",
-            estimated_tokens=700
-        )
+        reply_raw = None
+        is_media_mode = (mode == "media_reply")
+
+        # Outgoing guard: if leak is detected, drop + 1 retry, do not send
+        for attempt in range(2):
+            res = await self.gateway.generate(
+                prompt_name=f"persona_{mode}",
+                contents=contents,
+                system_instruction=system_instruction,
+                priority="P0",
+                estimated_tokens=700
+            )
+
+            if not res:
+                break
+
+            if isinstance(res, dict):
+                reply_raw = res
+                break
+
+            text_candidate = str(res)
+            if has_persona_leak(text_candidate, is_media=is_media_mode):
+                logger.warning(
+                    "Outgoing guard: detected prompt/metadata leak in persona reply (attempt %d/2): %.80s",
+                    attempt + 1, text_candidate
+                )
+                if attempt == 0:
+                    continue  # Retry generation once
+                else:
+                    logger.warning("Outgoing guard: leak persisted on retry, dropping reply.")
+                    reply_raw = None
+                    break
+            else:
+                reply_raw = text_candidate
+                break
 
         if not reply_raw:
             return
@@ -444,9 +472,11 @@ class FunnyBotApp:
             # Filter block comeback
             reply_raw = "Не, эту хуйню я озвучивать не буду."
 
-        # If media reply, verify and patch N/100 score
-        if media_cache_item and isinstance(reply_raw, str):
-            reply_raw = self.media_analyzer.verify_and_patch_reply_score(reply_raw, media_cache_item)
+        # If media reply, strip any boilerplate and verify/patch N/100 score
+        if is_media_mode and isinstance(reply_raw, str):
+            reply_raw = clean_media_reply_boilerplate(reply_raw)
+            if media_cache_item:
+                reply_raw = self.media_analyzer.verify_and_patch_reply_score(reply_raw, media_cache_item)
 
         await self.send_queue.enqueue(
             chat_id=chat_id,
@@ -480,6 +510,12 @@ class FunnyBotApp:
             return
 
         if decision.action.value == "reply" and decision.reply:
+            # Check outgoing leak guard on proactive reply as well
+            if has_persona_leak(decision.reply, is_media=False):
+                logger.warning("Outgoing guard: proactive reply contained leak, dropping.")
+                self.proactive.on_proactive_skipped()
+                return
+
             reply_to = decision.target_msg_id or None
             await self.send_queue.enqueue(
                 chat_id=chat_id,

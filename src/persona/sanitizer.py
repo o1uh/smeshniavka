@@ -9,6 +9,51 @@ TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z0-9_-]+)([^>]*)>")
 UN_RE = re.compile(r"\b(u\d+)\b")
 USER_ID_RE = re.compile(r"\b\d{8,12}\b")
 
+# Outgoing Leak Guards per user requirement
+# Patterns: Анализ трека: | Правила поведения | Контекст: | "action".*"reply" | Role: | Goal:
+LEAK_PATTERN = re.compile(
+    r"(анализ трека\s*:|правила поведения|контекст\s*:|\"action\"\s*.*\"reply\"|role\s*:|goal\s*:)",
+    re.IGNORECASE | re.DOTALL
+)
+
+# For mode_media_reply: forbid words Исполнитель / Жанр / Правила in outgoing reply
+MEDIA_FORBIDDEN_PATTERN = re.compile(
+    r"\b(исполнитель\s*:?|жанр\s*:?|правила\s*:?)\b",
+    re.IGNORECASE
+)
+
+
+def has_persona_leak(text: str, is_media: bool = False) -> bool:
+    """
+    Checks if model output contains internal prompt/reasoning leaks:
+    - Анализ трека: | Правила поведения | Контекст: | "action".*"reply" | Role: | Goal:
+    - For media replies: also checks for forbidden words Исполнитель | Жанр | Правила
+    """
+    if not text:
+        return False
+    if LEAK_PATTERN.search(text):
+        return True
+    if is_media and MEDIA_FORBIDDEN_PATTERN.search(text):
+        return True
+    return False
+
+
+def clean_media_reply_boilerplate(text: str) -> str:
+    """
+    Strips boilerplate template lines like 'Исполнитель: ...' or 'Жанр: ...' or 'Правила: ...'
+    leaving only the real commentary and N/100 score.
+    """
+    if not text:
+        return ""
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        if MEDIA_FORBIDDEN_PATTERN.search(line):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
 
 def sanitize_telegram_html(text: str) -> str:
     """
