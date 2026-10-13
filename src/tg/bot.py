@@ -276,6 +276,10 @@ class FunnyBotApp:
 
         # Save to database
         await self.db.save_message(msg_dict)
+        logger.info(
+            "📩 [msg #%d] %s (%s): %s",
+            message.message_id, nick, alias, text[:80] if text else f"[{media_kind or 'text'}]"
+        )
 
         # If update is stale, do not generate responses
         if is_stale:
@@ -517,12 +521,25 @@ class FunnyBotApp:
             if media_cache_item:
                 reply_raw = self.media_analyzer.verify_and_patch_reply_score(reply_raw, media_cache_item)
 
+        final_text = await self._resolve_aliases_to_text(chat_id, str(reply_raw))
         await self.send_queue.enqueue(
             chat_id=chat_id,
-            text=str(reply_raw),
+            text=final_text,
             reply_to_message_id=message.message_id,
             priority="P0"
         )
+
+    async def _resolve_aliases_to_text(self, chat_id: int, text: str) -> str:
+        last_msgs = await self.db.get_last_messages(chat_id, limit=60)
+        user_mapping = {
+            m.get("alias") or f"u{m.get('user_id')}": {
+                "user_id": m.get("user_id"),
+                "nick": m.get("nick"),
+                "username": None
+            }
+            for m in last_msgs
+        }
+        return replace_un_aliases(text, user_mapping)
 
     async def _process_proactive(self, message: types.Message, msg_dict: dict[str, Any]) -> None:
         chat_id = message.chat.id
@@ -556,9 +573,10 @@ class FunnyBotApp:
                 return
 
             reply_to = decision.target_msg_id or None
+            final_reply = await self._resolve_aliases_to_text(chat_id, decision.reply)
             await self.send_queue.enqueue(
                 chat_id=chat_id,
-                text=decision.reply,
+                text=final_reply,
                 reply_to_message_id=reply_to,
                 priority="P1"
             )
