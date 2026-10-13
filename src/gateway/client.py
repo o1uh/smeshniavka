@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import time
@@ -91,6 +92,42 @@ class KeyBucket:
         self.request_timestamps.append(now)
         self.token_timestamps.append((now, estimated_tokens))
         self.rpd_used += 1
+
+
+def clean_schema_for_gemini(raw_schema: dict) -> dict:
+    """
+    Cleans Pydantic JSON schema for Google Gemini REST API:
+    - Inlines all $ref definitions from $defs
+    - Removes $defs, additionalProperties, title, $schema, default
+    - Converts anyOf: [{type: T}, {type: null}] to nullable: true
+    """
+    schema = copy.deepcopy(raw_schema)
+    defs = schema.pop("$defs", {})
+
+    def resolve(node):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                ref_name = node["$ref"].split("/")[-1]
+                target = defs.get(ref_name, {})
+                return resolve(target)
+            res = {}
+            for k, v in node.items():
+                if k in ("title", "additionalProperties", "$schema", "default"):
+                    continue
+                if k == "anyOf" and isinstance(v, list):
+                    non_null = [item for item in v if item.get("type") != "null"]
+                    if len(non_null) == 1:
+                        resolved_child = resolve(non_null[0])
+                        res.update(resolved_child)
+                        res["nullable"] = True
+                        continue
+                res[k] = resolve(v)
+            return res
+        elif isinstance(node, list):
+            return [resolve(x) for x in node]
+        return node
+
+    return resolve(schema)
 
 
 class GeminiGateway(Gateway):
@@ -330,7 +367,7 @@ class GeminiGateway(Gateway):
         if response_schema:
             generation_config["responseMimeType"] = "application/json"
             if issubclass(response_schema, BaseModel):
-                generation_config["responseSchema"] = response_schema.model_json_schema()
+                generation_config["responseSchema"] = clean_schema_for_gemini(response_schema.model_json_schema())
 
         # Safety settings: All 4 OFF per R9
         safety_settings = [
@@ -354,6 +391,11 @@ class GeminiGateway(Gateway):
         if enable_search:
             payload["tools"] = [{"googleSearch": {}}]
 
+        candidate_models = [model_id]
+        for fallback in ("gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"):
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
+
         # Rotation loop
         while True:
             key_bucket = self._select_available_key(priority, estimated_tokens)
@@ -370,12 +412,24 @@ class GeminiGateway(Gateway):
             now = time.time()
             key_bucket.record_usage(estimated_tokens, now)
 
-            # Build URL
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={key_bucket.api_key}"
+            resp = None
+            status = 0
+            for curr_model in candidate_models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{curr_model}:generateContent?key={key_bucket.api_key}"
+                try:
+                    resp = await self._client.post(url, json=payload)
+                    status = resp.status_code
+                    if status not in (404, 503):
+                        break
+                    logger.warning("Model %s returned %d on %s, trying fallback...", curr_model, status, key_bucket.key_env)
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+                    logger.warning("Network error on model %s key %s: %s", curr_model, key_bucket.key_env, net_err)
+                    break
+
+            if resp is None:
+                continue
 
             try:
-                resp = await self._client.post(url, json=payload)
-                status = resp.status_code
 
                 if status == 200:
                     data = resp.json()

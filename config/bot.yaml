@@ -3,7 +3,7 @@
 
 ALLOWED_CHAT_ID: 0 # ID целевого чата из discover (отрицательный для супергрупп)
 OWNER_IDS: []      # ID владельцев бота (также могут быть заданы через env OWNER_IDS=123,456)
-MODEL_ID: "gemini-2.5-flash" # Обязателен, без дефолта
+MODEL_ID: "gemini-3.6-flash" # Обязателен, без дефолта
 TZ: "Asia/Novosibirsk"
 BOT_ALIASES: ["смешняв", "смешнявка"]
 SAFETY: "all OFF"
