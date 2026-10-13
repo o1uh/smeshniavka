@@ -17,7 +17,7 @@ from src.db.manager import DatabaseManager
 from src.db.contracts import TgSender
 from src.gateway.client import GeminiGateway
 from src.context.assemble import ContextAssembler
-from src.context.prompts import PromptBuilder
+from src.context.prompts import PromptBuilder, sanitize_nick
 from src.persona.reply import PingDetector, AuthorSpamLimiter, TgSendQueue
 from src.persona.proactive import ProactiveEngine
 from src.persona.sanitizer import (
