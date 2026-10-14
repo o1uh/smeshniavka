@@ -599,7 +599,9 @@ class FunnyBotApp:
             return
 
         prob_map = getattr(self.bot_cfg, "MEDIA_AUTO_ANALYZE_P", {}) or {}
-        p = prob_map.get(media_kind, 0.0)
+        if hasattr(prob_map, "model_dump"):
+            prob_map = prob_map.model_dump()
+        p = prob_map.get(media_kind, 0.0) if isinstance(prob_map, dict) else getattr(prob_map, media_kind, 0.0)
         if random.random() > p:
             return
 
@@ -668,14 +670,26 @@ class FunnyBotApp:
                 finally:
                     download_path.unlink(missing_ok=True)
 
-        # 3. Check Research (force triggers or soft triggers)
+        # 3. Check Research (force triggers, soft triggers, or media that may require context)
         text = (msg_dict.get("text") or "").strip()
         need_search = False
         safe_query = None
         sources_text = None
         show_links = self.research.should_show_links(text)
 
-        if self.research.should_force_search(text) or self.research.should_soft_search(text):
+        media_ctx = None
+        if media_cache_item:
+            m_sum = media_cache_item.get("summary") or ""
+            m_ocr = media_cache_item.get("ocr_text") or ""
+            parts = []
+            if m_sum:
+                parts.append(f"Медиа: {m_sum[:250]}")
+            if m_ocr:
+                parts.append(f"Текст на картинке: {m_ocr[:250]}")
+            if parts:
+                media_ctx = f"[{' | '.join(parts)}]"
+
+        if self.research.should_force_search(text) or self.research.should_soft_search(text) or bool(media_cache_item):
             last_msgs = await self.db.get_last_messages(chat_id, limit=10)
             history_lines = [f"{m.get('nick', 'User')}: {m.get('text', '')}" for m in last_msgs if m.get("text")]
             history_str = "\n".join(history_lines)
@@ -684,11 +698,12 @@ class FunnyBotApp:
             need_search, safe_query = await self.research.decide_search(
                 history_text=history_str,
                 current_text=text,
-                known_nicks=known_nicks
+                known_nicks=known_nicks,
+                extra_context=media_ctx
             )
 
-        if need_search and safe_query:
-            sources_text = f"[n=1 | Поиск в сети | query: {safe_query}]\nАктуальные данные получены через веб-поиск"
+        # Do NOT inject fake sources_text. The model autonomously runs search_web with search_query.
+        sources_text = None
 
         # 4. Mode determination
         if media_cache_item:
@@ -706,6 +721,7 @@ class FunnyBotApp:
             step2_data = {
                 "kind": media_cache_item.get("kind"),
                 "summary": summary_val[:300],  # Include summary per TB-15
+                "ocr_text": media_cache_item.get("ocr_text")[:300] if media_cache_item.get("ocr_text") else None,
                 "verdict": media_cache_item.get("verdict"),
                 "score100": media_cache_item.get("score100") if is_audio else None,
                 "score_reason": media_cache_item.get("score_reason") if is_audio else None,
@@ -742,6 +758,7 @@ class FunnyBotApp:
                 response_schema=PersonaTextReply,
                 estimated_tokens=700,
                 enable_search=True,  # Always empower autonomous web search on pings & media replies
+                search_query=safe_query if need_search else None,
                 session_id=f"tg_{chat_id}"
             )
 

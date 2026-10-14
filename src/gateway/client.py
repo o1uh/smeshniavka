@@ -306,6 +306,7 @@ class AntigravityGateway(Gateway):
         response_schema: Optional[type] = None,
         estimated_tokens: int = 1000,
         enable_search: bool = False,
+        search_query: Optional[str] = None,
         session_id: Optional[str] = None
     ) -> Any:
         """
@@ -322,6 +323,7 @@ class AntigravityGateway(Gateway):
                     response_schema=response_schema,
                     estimated_tokens=estimated_tokens,
                     enable_search=enable_search,
+                    search_query=search_query,
                     session_id=session_id
                 ),
                 timeout=75.0
@@ -356,6 +358,7 @@ class AntigravityGateway(Gateway):
         response_schema: Optional[type],
         estimated_tokens: int,
         enable_search: bool,
+        search_query: Optional[str],
         session_id: Optional[str]
     ) -> Any:
         gen_params = self.config.gen.get(prompt_name, {})
@@ -365,21 +368,38 @@ class AntigravityGateway(Gateway):
         # Convert contents to OpenAI chat completion format
         messages = convert_contents_to_messages(contents, system_instruction)
 
-        if enable_search or prompt_name in ("persona_research", "persona_ping", "persona_media_reply"):
+        search_directive = None
+        if search_query:
+            search_directive = (
+                f"\n[ОБЯЗАТЕЛЬНО вызови инструмент search_web с запросом: \"{search_query}\". "
+                "Изучи реальные факты/новости/события из результатов поиска и используй их в ответе в чат!]"
+            )
+        elif enable_search or prompt_name in ("persona_research", "persona_ping", "persona_media_reply"):
             search_directive = (
                 "\n[Инструкция по веб-поиску: тебе доступен инструмент search_web. "
                 "Сам думай, когда нужен поиск: если в вопросе, реплике или меме есть непонятные отсылки, "
                 "упоминаются города, персоны, события («в чем мем», «при чем тут...», происшествия, новости) — "
                 "вызывай search_web, чтобы узнать реальный контекст и факты, а затем едко ответь в чат]"
             )
+
+        if search_directive:
             found_system = False
             for m in messages:
                 if m.get("role") == "system":
-                    m["content"] = str(m.get("content", "")) + search_directive
+                    m["content"] = str(m.get("content", "")) + "\n" + search_directive
                     found_system = True
                     break
             if not found_system:
                 messages.insert(0, {"role": "system", "content": search_directive.strip()})
+
+            # Also append to the last user message for maximum attention in CLI sessions
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    if isinstance(m.get("content"), str):
+                        m["content"] = m["content"] + f"\n\n{search_directive}"
+                    elif isinstance(m.get("content"), list):
+                        m["content"].append({"type": "text", "text": f"\n\n{search_directive}"})
+                    break
 
         target_model = self._resolve_model(self.bot_config.MODEL_ID)
 

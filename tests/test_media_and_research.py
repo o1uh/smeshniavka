@@ -189,9 +189,20 @@ def test_research_triggers():
 
 
 def test_anonymize_query():
-    raw = "кто такой @vladimir u123456 и 1234567890?"
-    anon = anonymize_query(raw, known_nicks=["vladimir"])
+    raw = "кто такой @vladimir u123456 и 1234567890 смешнявка?"
+    anon = anonymize_query(raw, known_nicks=["vladimir"], bot_aliases=["смешнявка"])
     assert "@vladimir" not in (anon or "")
     assert "u123456" not in (anon or "")
     assert "1234567890" not in (anon or "")
+    assert "смешнявка" not in (anon or "")
     assert "кто такой" in (anon or "")
+
+
+def test_convert_contents_with_search_query_directive():
+    from src.gateway.client import convert_contents_to_messages
+    contents = [{"role": "user", "parts": [{"text": "в чем мем"}]}]
+    messages = convert_contents_to_messages(contents, system_instruction="SysPrompt")
+    assert len(messages) == 2
+    assert messages[0]["content"] == "SysPrompt"
+    assert messages[1]["content"] == "в чем мем"
+

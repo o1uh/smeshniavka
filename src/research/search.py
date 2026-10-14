@@ -13,11 +13,16 @@ from src.context.prompts import PromptBuilder
 USER_ANON_RE = re.compile(r"(@[a-zA-Z0-9_]+|\bu\d+\b|\b\d{8,12}\b)")
 
 
-def anonymize_query(query: str, known_nicks: Optional[list[str]] = None) -> Optional[str]:
+def anonymize_query(
+    query: str,
+    known_nicks: Optional[list[str]] = None,
+    bot_aliases: Optional[list[str]] = None
+) -> Optional[str]:
     """
     Anonymizes query per R8:
     - strips @username, uN, numeric ids
     - strips known participant nicks
+    - strips bot name and aliases
     """
     if not query:
         return None
@@ -27,6 +32,11 @@ def anonymize_query(query: str, known_nicks: Optional[list[str]] = None) -> Opti
         for nick in known_nicks:
             if nick and len(nick) >= 3:
                 clean = re.sub(re.escape(nick), "", clean, flags=re.IGNORECASE)
+
+    aliases = list(bot_aliases or []) + ["смешнявка", "смешняв", "смешнявки", "смешнявке", "смешнявку"]
+    for alias in aliases:
+        if alias and len(alias) >= 3:
+            clean = re.sub(re.escape(alias), "", clean, flags=re.IGNORECASE)
 
     clean = re.sub(r"\s+", " ", clean).strip()
     # If query is too short after anonymization, cannot search
@@ -73,16 +83,25 @@ class ResearchModule:
             "кто такой",
             "что такое",
             "поясни за",
+            "поясни",
+            "разъясни",
             "причем тут",
             "при чем тут",
             "причем здесь",
             "при чем здесь",
+            "причем",
+            "при чем",
             "в чем мем",
             "в чем прикол",
             "в чем суть",
+            "в чем смысл",
             "что за мем",
             "че за мем",
             "че за прикол",
+            "че за",
+            "что за",
+            "о чем речь",
+            "про что",
             "че с ",
             "что с ",
             "откуда это",
@@ -103,7 +122,8 @@ class ResearchModule:
         self,
         history_text: str,
         current_text: str,
-        known_nicks: Optional[list[str]] = None
+        known_nicks: Optional[list[str]] = None,
+        extra_context: Optional[str] = None
     ) -> tuple[bool, Optional[str]]:
         """
         Determines whether search is needed. Returns (need_search, anonymized_query).
@@ -114,9 +134,13 @@ class ResearchModule:
             mode_or_modular="research_decide",
             bot_name="Смешнявка"
         )
+        cur_payload = current_text
+        if extra_context:
+            cur_payload = f"{current_text}\n{extra_context}"
+
         contents = PromptBuilder.build_contents(
             history=history_text,
-            current=current_text,
+            current=cur_payload,
             request=f'forced="{"true" if forced else "false"}"'
         )
 
@@ -134,10 +158,10 @@ class ResearchModule:
             return False, None
 
         raw_query = (dec_result.query if dec_result and dec_result.query else current_text)
-        safe_query = anonymize_query(raw_query, known_nicks)
+        safe_query = anonymize_query(raw_query, known_nicks, bot_aliases=self.config.BOT_ALIASES)
         if not safe_query and forced:
             # Fallback for forced search: strip commands/mentions and use current text
-            safe_query = anonymize_query(current_text, known_nicks)
+            safe_query = anonymize_query(current_text, known_nicks, bot_aliases=self.config.BOT_ALIASES)
 
         if not safe_query:
             logger.info("Search query could not be anonymized, skipping search")
