@@ -35,7 +35,7 @@ LONG_DIGITS_RE = re.compile(r"\b\d{8,}\b")
 CODE_FENCE_RE = re.compile(r"```|^\s*[-*•]\s+|\d+\.\s+", re.MULTILINE)
 
 
-def prefilter_ok(text: Optional[str], min_len: int = 6, max_len: int = 150) -> bool:
+def prefilter_ok(text: Optional[str], min_len: int = 6, max_len: int = 150, allow_single: bool = False) -> bool:
     """Дешёвый кодовый префильтр до LLM-проверки: только живой текст чата."""
     if not text:
         return False
@@ -48,7 +48,7 @@ def prefilter_ok(text: Optional[str], min_len: int = 6, max_len: int = 150) -> b
         return False  # ссылки/упоминания/id — не тащим в банк
     if CODE_FENCE_RE.search(t):
         return False
-    if len(t.split()) < 2 and len(t) < 10:
+    if not allow_single and len(t.split()) < 2 and len(t) < 10:
         return False  # одиночные междометия без контекста не самодостаточны
     return True
 
@@ -142,6 +142,44 @@ class StyleLearner:
             logger.info("Style learner: candidate collected (%.40s...)", clean)
         return ok
 
+    async def collect_prime(
+        self, chat_id: int, user_id: Optional[int], text: Optional[str]
+    ) -> bool:
+        """Прайм-кандидат по смеякам (4+): в начало очереди, на разбор первым.
+
+        Фильтр пропустит всё равно (PII/вред отсекается там), но префильтр
+        мягче — короткое вроде «бум» с 4 смеяками тоже deserve a look.
+        """
+        if not self.enabled or not text:
+            return False
+        max_len = int(getattr(self.config, "STYLE_MAX_LEN", 150) or 150)
+        clean = scrub_pii(text.strip())
+        # Прайм по смеякам: одиночное «бум»/«хуюл» с 4 смеяками тоже смотрим
+        if not prefilter_ok(clean, min_len=2, max_len=max_len, allow_single=True):
+            return False
+        if user_id:
+            try:
+                if await self.db.is_opt_out(chat_id, user_id):
+                    return False
+            except Exception:
+                return False
+
+        async with self._lock:
+            cand_path, active_path = self._paths()
+            candidates = self._read_yaml_list(cand_path, "candidates")
+            active = self._read_yaml_list(active_path, "examples")
+            known = {c.get("text") for c in candidates if isinstance(c, dict)}
+            known |= {a for a in active if isinstance(a, str)}
+            if clean in known:
+                return False
+            cid = f"p{int(time.time())}{random.randint(100, 999)}"
+            candidates.insert(0, {"id": cid, "text": clean, "ts": int(time.time()), "prime": True})
+            candidates = candidates[:200]
+            ok = self._write_yaml(cand_path, {"candidates": candidates})
+        if ok:
+            logger.warning("Style learner: PRIME candidate by laughs (%.40s...)", clean)
+        return ok
+
     async def maybe_promote(self) -> int:
         """Прогнать полный батч кандидатов через style_filter и дописать ok в актив.
 
@@ -199,6 +237,7 @@ class StyleLearner:
             candidates = [c for c in candidates if c.get("id") not in done_ids]
             self._write_yaml(cand_path, {"candidates": candidates})
             added = 0
+            need_evict = False
             if ok_texts:
                 active = [a for a in self._read_yaml_list(active_path, "examples") if isinstance(a, str)]
                 have = set(active)
@@ -207,9 +246,69 @@ class StyleLearner:
                         active.append(t)
                         have.add(t)
                         added += 1
-                # FIFO-потолок: свежие срачи вытесняют старые сиды
-                active = active[-max_active:]
-                self._write_yaml(active_path, {"examples": active})
+                if len(active) > max_active:
+                    need_evict = True
+                    evict_snapshot = list(active)
+                else:
+                    self._write_yaml(active_path, {"examples": active})
+
+        # Переполнение: слабых выкидываем вне лока (там сетевые вызовы),
+        # иначе сбор кандидатов встанет на время фильтрации всего банка
+        if need_evict:
+            await self._apply_weakest_eviction(evict_snapshot, max_active)
         if added:
             logger.info("Style learner: promoted %d examples to active bank", added)
         return added
+
+    async def _apply_weakest_eviction(self, snapshot: list[str], max_active: int) -> None:
+        """Выкинуть слабые примеры из переполненного банка (см. _filter_weak)."""
+        weak = await self._filter_weak(snapshot)
+        async with self._lock:
+            _, active_path = self._paths()
+            active = [a for a in self._read_yaml_list(active_path, "examples") if isinstance(a, str)]
+            if weak is None:
+                # Фильтр лёг — честный FIFO
+                active = active[-max_active:] if max_active > 0 else []
+            else:
+                dropped = len([t for t in active if t in weak])
+                active = [t for t in active if t not in weak]
+                if dropped:
+                    logger.info("Style learner: evicting %d weakest examples", dropped)
+                if len(active) > max_active:
+                    active = active[-max_active:] if max_active > 0 else []
+            self._write_yaml(active_path, {"examples": active})
+
+    async def _filter_weak(self, active: list[str]) -> Optional[set[str]]:
+        """Прогнать банк через style_filter. Возвращает тексты слабых или None при ошибке."""
+        batch_n = int(getattr(self.config, "STYLE_FILTER_BATCH", 30) or 30)
+        filter_path = self.prompts_dir / "style_filter.txt"
+        try:
+            system_instruction = (
+                filter_path.read_text(encoding="utf-8")
+                if filter_path.exists()
+                else "Отбери короткие живые реплики."
+            )
+        except Exception:
+            system_instruction = "Отбери короткие живые реплики."
+        try:
+            weak: set[str] = set()
+            for start in range(0, len(active), batch_n):
+                chunk = active[start:start + batch_n]
+                lines = "\n".join(f"[e{start + i}] {t}" for i, t in enumerate(chunk))
+                verdicts: Optional[StyleVerdicts] = await self.gateway.generate(
+                    prompt_name="style_filter",
+                    contents=[{"role": "user", "parts": [{"text": f"<candidates>\n{lines}\n</candidates>"}]}],
+                    system_instruction=system_instruction,
+                    priority="P2",
+                    response_schema=StyleVerdicts,
+                    estimated_tokens=2000,
+                    lane="sys",
+                )
+                by_idx = {v.id: v.ok for v in (verdicts.verdicts if verdicts else [])}
+                for i, t in enumerate(chunk):
+                    if by_idx.get(f"e{start + i}") is False:
+                        weak.add(t)
+            return weak
+        except Exception as e:
+            logger.warning("Style learner: eviction filter failed, FIFO fallback: %s", e)
+            return None

@@ -159,7 +159,7 @@ async def async_main():
 
     # Start Polling
     polling_task = asyncio.create_task(
-        app.dp.start_polling(app.bot, allowed_updates=[UpdateType.MESSAGE, UpdateType.EDITED_MESSAGE, UpdateType.MY_CHAT_MEMBER])
+        app.dp.start_polling(app.bot, allowed_updates=[UpdateType.MESSAGE, UpdateType.EDITED_MESSAGE, UpdateType.MY_CHAT_MEMBER, UpdateType.MESSAGE_REACTION])
     )
 
     # Wait until stop_event or polling error

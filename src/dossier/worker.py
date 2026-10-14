@@ -64,10 +64,14 @@ class DossierWorker:
         if not messages:
             return False
 
-        # Filter out messages with NULL user_id or users who opted out
+        # Filter out messages with NULL user_id or users who opted out.
+        # Свои исходящие (is_bot) в досье не идут — иначе заведём досье на самого бота.
+        bot_uids = {m["user_id"] for m in messages if m.get("is_bot") and m.get("user_id")}
         window_authors = {m["user_id"] for m in messages if m.get("user_id")}
         active_authors = []
         for uid in window_authors:
+            if uid in bot_uids:
+                continue
             if not await self.db.is_opt_out(chat_id, uid):
                 active_authors.append(uid)
 
@@ -171,6 +175,10 @@ class DossierWorker:
         # Rule 1: msg_id must exist in window
         msg = msg_map.get(obs.msg_id)
         if not msg:
+            return False
+
+        # Rule 1b: свои исходящие досье не пополняют (иначе досье на бота)
+        if msg.get("is_bot"):
             return False
 
         # Rule 2: User must match author of msg

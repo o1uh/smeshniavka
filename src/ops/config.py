@@ -147,6 +147,11 @@ class BotConfig(BaseModel):
     SEARCH_FORCE_TRIGGERS: list[str] = Field(
         default_factory=lambda: ["загугли", "погугли", "ресерч", "пруф", "чекни"]
     )
+    # Смеяки как сигнал качества для банка стиля
+    REACT_LAUGH_THRESHOLD: int = 4
+    REACT_LAUGH_EMOJIS: list[str] = Field(
+        default_factory=lambda: ["😁", "😂", "🤣", "😆", "😹", "🤭"]
+    )
     LINK_TRIGGERS: list[str] = Field(
         default_factory=lambda: ["что за", "о чём", "пруф", "суть"]
     )

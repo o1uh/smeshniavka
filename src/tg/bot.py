@@ -33,6 +33,7 @@ from src.research.search import ResearchModule
 from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA
 from src.antijob.detector import ProvocationDetector
 from src.style.learner import StyleLearner
+from src.tg.reactions import ReactionsTracker
 from src.tg.stubs import (
     format_sticker_stub,
     format_animation_stub,
@@ -215,6 +216,11 @@ class FunnyBotApp:
         self.media_analyzer = MediaAnalyzer(self.bot_cfg, self.db, self.gateway, self.prompts)
         self.research = ResearchModule(self.bot_cfg, self.db, self.gateway, self.prompts)
         self.style_learner = StyleLearner(self.bot_cfg, self.db, self.gateway)
+        self.send_queue.on_sent = self._on_bot_sent
+        self.reactions = ReactionsTracker(
+            laugh_emojis=set(getattr(self.bot_cfg, "REACT_LAUGH_EMOJIS", None) or {"😁", "😂", "🤣", "😆", "😹", "🤭"}),
+            threshold=int(getattr(self.bot_cfg, "REACT_LAUGH_THRESHOLD", 4) or 4),
+        )
 
         self.ping_detector: Optional[PingDetector] = None
         self.bot_id = 0
@@ -236,6 +242,51 @@ class FunnyBotApp:
         self.dp.message.register(self.handle_message)
         self.dp.edited_message.register(self.handle_edited_message)
         self.dp.my_chat_member.register(self.handle_my_chat_member)
+        self.dp.message_reaction.register(self.handle_reaction)
+
+    async def _on_bot_sent(
+        self, chat_id: int, message_id: int, text: str, reply_to: Optional[int]
+    ) -> None:
+        """Пишем свои исходящие в БД: модель видит свои реплики в истории,
+        а смеяки на них резолвят текст для прайм-кандидатов. Best-effort."""
+        try:
+            await self.db.save_message({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "user_id": self.bot_id,
+                "alias": f"u{self.bot_id}" if self.bot_id else "u0",
+                "nick": "Смешнявка",
+                "text": text,
+                "reply_to": reply_to,
+                "is_bot": 1,
+                "created_at": to_iso_date(time.time()),
+            })
+        except Exception as e:
+            logger.warning("Failed to save outgoing message %s/%s: %s", chat_id, message_id, e)
+
+    async def handle_reaction(self, event: Any) -> None:
+        """Смеяки 4+ distinct — прайм-кандидат в банк стиля (текст из БД)."""
+        try:
+            chat = event.chat
+            if not self.chat_resolver.is_allowed(chat.id):
+                return
+            emojis: set[str] = set()
+            for r in (getattr(event, "new_reaction", None) or []):
+                if getattr(r, "type", None) == "emoji" and getattr(r, "emoji", None):
+                    emojis.add(r.emoji)
+            user = getattr(event, "user", None)
+            primed = self.reactions.handle(
+                chat.id, event.message_id,
+                getattr(user, "id", None), emojis,
+            )
+            if not primed:
+                return
+            row = await self.db.get_message(chat.id, event.message_id)
+            if not row or not (row.get("text") or "").strip():
+                return
+            await self.style_learner.collect_prime(chat.id, row.get("user_id"), row.get("text"))
+        except Exception as e:
+            logger.warning("Reaction handling failed: %s", e)
 
     async def initialize(self) -> None:
         me = await self.bot.get_me()
