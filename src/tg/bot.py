@@ -31,6 +31,7 @@ from src.dossier.worker import DossierWorker
 from src.media.analyzer import MediaAnalyzer, contains_forbidden_score, SCORE_PATTERN, build_step2_media_json
 from src.research.search import ResearchModule
 from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA
+from src.antijob.detector import ProvocationDetector
 from src.tg.stubs import (
     format_sticker_stub,
     format_animation_stub,
@@ -787,6 +788,19 @@ class FunnyBotApp:
         # 2. Медиа и история — параллельно: пока качается файл, уже читаем контекст
         text = (msg_dict.get("text") or "").strip()
         show_links = self.research.should_show_links(text)
+        # Провокация в адрес бота: реплай ему + оскорбление/подначивание/разводка.
+        # Обычные подъёбы между участниками — не провокация, там дефолт-режим.
+        t_low = text.lower()
+        _is_reply_to_bot = bool(msg_dict.get("reply_to_user_id") == self.bot_id and self.bot_id)
+        _mentions = (f"@{self.bot_username}".lower() in t_low) if getattr(self, "bot_username", "") else False
+        if not _mentions:
+            for _a in (self.bot_cfg.BOT_ALIASES or []):
+                if _a and _a.lower() in t_low:
+                    _mentions = True
+                    break
+        provoked = ProvocationDetector.is_provoked(
+            text, is_reply_to_bot=_is_reply_to_bot, mentions_bot=_mentions
+        )
         want_decide = (
             self.research.should_force_search(text)
             or self.research.should_soft_search(text)
@@ -949,6 +963,8 @@ class FunnyBotApp:
             request_attrs += f' show_links="{"true" if show_links else "false"}"'
         if reply_snapshot and reply_snapshot.get("alias"):
             request_attrs += f' reply_target="{reply_snapshot.get("alias")}"'
+        # Явный флаг для промпта: провокация в адрес бота → режим жёсткого отпора
+        request_attrs += f' provoked="{"true" if provoked else "false"}"'
 
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
@@ -961,6 +977,9 @@ class FunnyBotApp:
 
         reply_raw = None
         is_media_mode = (mode == "media_reply")
+        # При провокации второй провал гарда не должен давать вялую отмазку —
+        # лучше первый валидный (пусть длинноватый) кандидат, чем «башка не варит»
+        provoked_fallback: Optional[str] = None
 
         # Outgoing guard: leak/bad parse/forbidden N/100 на фото → 1 repair, сырое не шлём
         for attempt in range(2):
@@ -1014,8 +1033,22 @@ class FunnyBotApp:
                 if attempt == 0:
                     continue
                 candidate_text = SCORE_PATTERN.sub("", candidate_text).strip()
+            # Провокация: отпор обязан быть коротким и рубленым — длинноту в repair
+            if provoked and not is_media_mode and not ProvocationDetector.provoked_reply_ok(candidate_text):
+                logger.warning(
+                    "Outgoing guard: provoked reply too soft/long on attempt %d/2 (text: %.80s)",
+                    attempt + 1, candidate_text,
+                )
+                if provoked_fallback is None:
+                    provoked_fallback = candidate_text
+                if attempt == 0:
+                    continue
+                candidate_text = provoked_fallback
             reply_raw = candidate_text
             break
+
+        if not reply_raw and provoked_fallback:
+            reply_raw = provoked_fallback
 
         if not reply_raw:
             # Fallback to static degraded excuse instead of sending raw/broken text
