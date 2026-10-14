@@ -21,6 +21,16 @@ fi
 echo "--> Подготовка удаленной директории ${REMOTE_DIR}..."
 ssh "${SSH_OPTS[@]}" "${RPI_HOST}" "sudo -n mkdir -p ${REMOTE_DIR} && sudo -n chown -R \$(whoami):\$(whoami) ${REMOTE_DIR}"
 
+# 1.1 Защита секретов: создание резервной копии .env на RPi перед синк-операцией
+echo "--> Проверка и бэкап секретов на Raspberry Pi..."
+ssh "${SSH_OPTS[@]}" "${RPI_HOST}" bash -s << 'EOF'
+if [ -f "/opt/smeshniavka/.env" ]; then
+    mkdir -p /opt/smeshniavka/backups
+    cp -p /opt/smeshniavka/.env "/opt/smeshniavka/backups/.env.bak_$(date +%Y%m%d_%H%M%S)"
+    echo "✓ Резервная копия .env успешно создана в backups/"
+fi
+EOF
+
 # 2. Синхронизация файлов кодовой базы
 echo "--> Синхронизация файлов кодовой базы в ${REMOTE_DIR}..."
 RSYNC_RSH="ssh"
@@ -30,17 +40,15 @@ fi
 
 rsync -avz --delete -e "${RSYNC_RSH}" \
     --exclude '.venv' \
-    --exclude '.env' \
+    --include '.env.example' \
+    --exclude '.env*' \
     --exclude '__pycache__' \
     --exclude '.git' \
     --exclude '.pytest_cache' \
-    --exclude 'data/*.db' \
-    --exclude 'data/*.db-wal' \
-    --exclude 'data/*.db-shm' \
-    --exclude 'data/bot.lock' \
-    --exclude 'logs/*' \
-    --exclude 'reports/*' \
-    --exclude 'backups/*' \
+    --exclude 'data/***' \
+    --exclude 'logs/***' \
+    --exclude 'reports/***' \
+    --exclude 'backups/***' \
     ./ "${RPI_HOST}:${REMOTE_DIR}/"
 
 # 3. Подготовка структуры и запуск Docker Compose
