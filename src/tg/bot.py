@@ -702,12 +702,13 @@ class FunnyBotApp:
         step2_media_json = None
         if media_cache_item:
             summary_val = media_cache_item.get("summary") or ""
+            is_audio = (media_cache_item.get("kind") == "audio")
             step2_data = {
                 "kind": media_cache_item.get("kind"),
                 "summary": summary_val[:300],  # Include summary per TB-15
                 "verdict": media_cache_item.get("verdict"),
-                "score100": media_cache_item.get("score100"),
-                "score_reason": media_cache_item.get("score_reason"),
+                "score100": media_cache_item.get("score100") if is_audio else None,
+                "score_reason": media_cache_item.get("score_reason") if is_audio else None,
                 "track_meta": media_cache_item.get("track_meta"),
                 "tags": media_cache_item.get("tags"),
                 "unintelligible": media_cache_item.get("unintelligible"),
@@ -740,7 +741,7 @@ class FunnyBotApp:
                 priority="P0",
                 response_schema=PersonaTextReply,
                 estimated_tokens=700,
-                enable_search=bool(need_search),
+                enable_search=True,  # Always empower autonomous web search on pings & media replies
                 session_id=f"tg_{chat_id}"
             )
 

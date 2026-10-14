@@ -365,8 +365,13 @@ class AntigravityGateway(Gateway):
         # Convert contents to OpenAI chat completion format
         messages = convert_contents_to_messages(contents, system_instruction)
 
-        if enable_search or prompt_name == "persona_research":
-            search_directive = "\n[Инструкция: для поиска актуальных новостей, фактов или проверки информации обязательно используй инструмент search_web]"
+        if enable_search or prompt_name in ("persona_research", "persona_ping", "persona_media_reply"):
+            search_directive = (
+                "\n[Инструкция по веб-поиску: тебе доступен инструмент search_web. "
+                "Сам думай, когда нужен поиск: если в вопросе, реплике или меме есть непонятные отсылки, "
+                "упоминаются города, персоны, события («в чем мем», «при чем тут...», происшествия, новости) — "
+                "вызывай search_web, чтобы узнать реальный контекст и факты, а затем едко ответь в чат]"
+            )
             found_system = False
             for m in messages:
                 if m.get("role") == "system":

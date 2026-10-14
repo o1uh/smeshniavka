@@ -63,7 +63,7 @@ class MediaAnalyzer:
                 "-ac", "1", "-b:a", "64k",
                 str(out_path)
             ]
-        elif kind in ("video", "video_note"):
+        elif kind in ("video", "video_note", "animation"):
             out_path = out_path.with_suffix(".mp4")
             cmd = [
                 "ffmpeg", "-y", "-t", "60", "-i", str(input_path),
@@ -147,7 +147,12 @@ class MediaAnalyzer:
         ]
         if caption:
             parts.append({"text": f"<caption>{caption}</caption>"})
-        req_kind = "photo" if kind == "sticker" else kind
+        if kind == "sticker":
+            req_kind = "photo"
+        elif kind == "animation":
+            req_kind = "video"
+        else:
+            req_kind = kind
         parts.append({"text": f'<request kind="{req_kind}"/>'})
 
         contents = [{"role": "user", "parts": parts}]

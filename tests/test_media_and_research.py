@@ -182,6 +182,9 @@ def test_research_triggers():
     assert mod.should_soft_search("А в связи с последними событиями как тебе мем") is True
     assert mod.should_soft_search("что случилось в мире") is True
     assert mod.should_soft_search("поясни за этот тренд") is True
+    assert mod.should_soft_search("а причем тут иркутск") is True
+    assert mod.should_soft_search("в чем мем") is True
+    assert mod.should_soft_search("что за мем вообще") is True
     assert mod.should_soft_search("просто привет") is False
 
 
