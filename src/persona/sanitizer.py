@@ -35,6 +35,16 @@ MEDIA_FORBIDDEN_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Cliché insult patterns: noun + adjective or adjective + noun templates like
+# "ебака грозный", "клоун комнатный", "боец диванный", "диванный воин", "мамкин бандит", etc.
+CLICHE_INSULT_RE = re.compile(
+    r"\b(ебака|клоун|боец|воин|эксперт|бандит|гений|мыслитель|терпила)\s+"
+    r"(грозный|комнатный|диванный|хуев|великий|недоделанный)\b|"
+    r"\b(грозный|комнатный|диванный|мамкин|великий)\s+"
+    r"(ебака|клоун|боец|воин|бандит|эксперт|гений|мыслитель|терпила)\b",
+    re.IGNORECASE
+)
+
 
 def has_persona_leak(text: str, is_media: bool = False) -> bool:
     """
@@ -143,6 +153,10 @@ def validate_persona_reply(
     colon_lines = sum(1 for line in text.split("\n") if ":" in line)
     if colon_lines >= 3:
         return False, "Contains 3+ colon lines (dump sign)"
+
+    # 8. Cliché adjective-noun insult template rejection
+    if CLICHE_INSULT_RE.search(text):
+        return False, "Contains cliché adjective-noun insult template"
 
     return True, None
 

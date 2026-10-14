@@ -219,3 +219,34 @@ def test_fuzzing_dumps_and_leaks():
     for legit in legit_replies:
         is_valid, reason = validate_persona_reply(legit, is_media=False)
         assert is_valid, f"False positive on legitimate reply: {legit} (reason: {reason})"
+
+
+def test_cliche_insult_rejection():
+    cliche_samples = [
+        "зубы сначала почисти, ебака грозный",
+        "завали пасть, клоун комнатный",
+        "боец диванный тут нашелся",
+        "ну давай расскажи, диванный воин",
+        "мамкин бандит в чате",
+        "эксперт хуев объявился",
+        "гений комнатный бля",
+        "терпила комнатный заговорил",
+    ]
+    for sample in cliche_samples:
+        is_valid, reason = validate_persona_reply(sample)
+        assert not is_valid, f"Failed to reject cliché insult: {sample}"
+        assert reason == "Contains cliché adjective-noun insult template"
+
+    natural_roasts = [
+        "зубы сначала почисти потом пасть открывай",
+        "ты это в зеркало каждое утро повторяешь?",
+        "не трясись ты так, экран слюнями забрызгаешь",
+        "сходи форточку открой, душно стало",
+        "тебя кто вообще из клетки выпустил",
+        "иди поспи реально, бред несешь",
+        "сам-то понял че высрал",
+    ]
+    for sample in natural_roasts:
+        is_valid, reason = validate_persona_reply(sample)
+        assert is_valid, f"False positive on natural roast: {sample} (reason: {reason})"
+
