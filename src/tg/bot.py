@@ -502,11 +502,23 @@ class FunnyBotApp:
             return True
 
         elif text.startswith("/reset"):
-            ok = await self.gateway.reset_session(f"tg_{message.chat.id}")
-            if ok:
-                await message.reply("Сессия контекста диалога на мосту Antigravity сброшена.")
+            ok_any = False
+            for lane in (LANE_CHAT, LANE_TRACK, LANE_MEDIA):
+                try:
+                    if await self.gateway.reset_session(self._lane_session(message.chat.id, lane)):
+                        ok_any = True
+                except Exception:
+                    pass
+            # Совместимость со старой сессией без суффикса лейна
+            try:
+                if await self.gateway.reset_session(f"tg_{message.chat.id}"):
+                    ok_any = True
+            except Exception:
+                pass
+            if ok_any:
+                await message.reply("Сессии контекста диалога на мосту Antigravity сброшены (chat/track/media).")
             else:
-                await message.reply("Сессия не найдена или уже была очищена.")
+                await message.reply("Сессии не найдены или уже были очищены.")
             return True
 
         elif text.startswith("/me"):
