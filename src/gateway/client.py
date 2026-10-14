@@ -113,15 +113,26 @@ def convert_contents_to_messages(
                         inline = part["inline_data"]
                         mime = inline.get("mime_type", "")
                         data = inline.get("data", "")
+                        data_url = f"data:{mime};base64,{data}"
                         if mime.startswith("image/"):
                             structured_blocks.append({
                                 "type": "image_url",
-                                "image_url": {"url": f"data:{mime};base64,{data}"}
+                                "image_url": {"url": data_url}
+                            })
+                        elif mime.startswith("audio/"):
+                            structured_blocks.append({
+                                "type": "audio_url",
+                                "audio_url": {"url": data_url}
+                            })
+                        elif mime.startswith("video/"):
+                            structured_blocks.append({
+                                "type": "video_url",
+                                "video_url": {"url": data_url}
                             })
                         else:
                             structured_blocks.append({
-                                "type": "text",
-                                "text": f"\n[Прикрепленный медиафайл: mime={mime}]\n"
+                                "type": "media_url",
+                                "media_url": {"url": data_url}
                             })
                 elif isinstance(part, str):
                     text_blocks.append(part)
@@ -353,6 +364,17 @@ class AntigravityGateway(Gateway):
 
         # Convert contents to OpenAI chat completion format
         messages = convert_contents_to_messages(contents, system_instruction)
+
+        if enable_search or prompt_name == "persona_research":
+            search_directive = "\n[Инструкция: для поиска актуальных новостей, фактов или проверки информации обязательно используй инструмент search_web]"
+            found_system = False
+            for m in messages:
+                if m.get("role") == "system":
+                    m["content"] = str(m.get("content", "")) + search_directive
+                    found_system = True
+                    break
+            if not found_system:
+                messages.insert(0, {"role": "system", "content": search_directive.strip()})
 
         target_model = self._resolve_model(self.bot_config.MODEL_ID)
 

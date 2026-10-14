@@ -37,8 +37,104 @@ from src.tg.stubs import (
     format_dice_stub,
     extract_clean_urls,
 )
+from dataclasses import dataclass
 from src.tg.filters import RuntimeChatResolver, check_media_caps
 from src.ops.alerts import AlertManager
+
+
+@dataclass
+class ExtractedMedia:
+    media_kind: Optional[str] = None
+    file_id: Optional[str] = None
+    file_unique_id: Optional[str] = None
+    file_size: int = 0
+    duration: Optional[int] = None
+    caption: Optional[str] = None
+    text_stub: Optional[str] = None
+
+
+def extract_media_info(message: types.Message) -> ExtractedMedia:
+    media_kind = None
+    file_unique_id = None
+    file_id = None
+    file_size = 0
+    duration = None
+    text_stub = None
+
+    if message.sticker:
+        media_kind = "sticker"
+        text_stub = format_sticker_stub(message.sticker.emoji, message.sticker.set_name)
+    elif message.animation:
+        media_kind = "animation"
+        file_unique_id = message.animation.file_unique_id
+        file_id = message.animation.file_id
+        file_size = message.animation.file_size or 0
+        duration = message.animation.duration
+        text_stub = format_animation_stub(message.caption)
+    elif message.voice:
+        media_kind = "voice"
+        file_unique_id = message.voice.file_unique_id
+        file_id = message.voice.file_id
+        file_size = message.voice.file_size or 0
+        duration = message.voice.duration
+        text_stub = "[войс]"
+    elif message.video_note:
+        media_kind = "video_note"
+        file_unique_id = message.video_note.file_unique_id
+        file_id = message.video_note.file_id
+        file_size = message.video_note.file_size or 0
+        duration = message.video_note.duration
+        text_stub = "[кружочек]"
+    elif message.video:
+        media_kind = "video"
+        file_unique_id = message.video.file_unique_id
+        file_id = message.video.file_id
+        file_size = message.video.file_size or 0
+        duration = message.video.duration
+        text_stub = "[видео]"
+    elif message.photo:
+        media_kind = "photo"
+        photo_obj = message.photo[-1]
+        file_unique_id = photo_obj.file_unique_id
+        file_id = photo_obj.file_id
+        file_size = photo_obj.file_size or 0
+        text_stub = "[фото]"
+    elif message.audio:
+        media_kind = "audio"
+        file_unique_id = message.audio.file_unique_id
+        file_id = message.audio.file_id
+        file_size = message.audio.file_size or 0
+        duration = message.audio.duration
+        meta_parts = []
+        if message.audio.performer:
+            meta_parts.append(message.audio.performer)
+        if message.audio.title:
+            meta_parts.append(message.audio.title)
+        audio_info = f" ({' - '.join(meta_parts)})" if meta_parts else ""
+        text_stub = f"[аудио{audio_info}]"
+    elif message.poll:
+        media_kind = "poll"
+        opts = [o.text for o in message.poll.options]
+        text_stub = format_poll_stub(message.poll.question, opts)
+    elif message.dice:
+        media_kind = "dice"
+        text_stub = format_dice_stub(message.dice.emoji, message.dice.value)
+    elif message.contact:
+        media_kind = "contact"
+        text_stub = "[контакт]"
+    elif message.location or message.venue:
+        media_kind = "location"
+        text_stub = "[геопозиция]"
+
+    return ExtractedMedia(
+        media_kind=media_kind,
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        file_size=file_size,
+        duration=duration,
+        caption=message.caption,
+        text_stub=text_stub,
+    )
 
 
 class RealTgSender(TgSender):
@@ -211,76 +307,15 @@ class FunnyBotApp:
         is_stale = msg_age > self.bot_cfg.STALE_UPDATE_S
 
         # 5. Extract sender kind, media kind, stubs
-        media_kind = None
-        file_unique_id = None
-        file_id = None
-        file_size = 0
-        duration = None
+        media_ext = extract_media_info(message)
+        media_kind = media_ext.media_kind
+        file_unique_id = media_ext.file_unique_id
+        file_id = media_ext.file_id
+        file_size = media_ext.file_size
+        duration = media_ext.duration
 
-        if message.sticker:
-            media_kind = "sticker"
-            text = format_sticker_stub(message.sticker.emoji, message.sticker.set_name)
-        elif message.animation:
-            media_kind = "animation"
-            file_unique_id = message.animation.file_unique_id
-            file_id = message.animation.file_id
-            file_size = message.animation.file_size or 0
-            duration = message.animation.duration
-            text = format_animation_stub(message.caption)
-        elif message.voice:
-            media_kind = "voice"
-            file_unique_id = message.voice.file_unique_id
-            file_id = message.voice.file_id
-            file_size = message.voice.file_size or 0
-            duration = message.voice.duration
-            text = text or "[войс]"
-        elif message.video_note:
-            media_kind = "video_note"
-            file_unique_id = message.video_note.file_unique_id
-            file_id = message.video_note.file_id
-            file_size = message.video_note.file_size or 0
-            duration = message.video_note.duration
-            text = text or "[кружочек]"
-        elif message.video:
-            media_kind = "video"
-            file_unique_id = message.video.file_unique_id
-            file_id = message.video.file_id
-            file_size = message.video.file_size or 0
-            duration = message.video.duration
-            text = text or "[видео]"
-        elif message.photo:
-            media_kind = "photo"
-            photo_obj = message.photo[-1]
-            file_unique_id = photo_obj.file_unique_id
-            file_id = photo_obj.file_id
-            file_size = photo_obj.file_size or 0
-            text = text or "[фото]"
-        elif message.audio:
-            media_kind = "audio"
-            file_unique_id = message.audio.file_unique_id
-            file_id = message.audio.file_id
-            file_size = message.audio.file_size or 0
-            duration = message.audio.duration
-            meta_parts = []
-            if message.audio.performer:
-                meta_parts.append(message.audio.performer)
-            if message.audio.title:
-                meta_parts.append(message.audio.title)
-            audio_info = f" ({' - '.join(meta_parts)})" if meta_parts else ""
-            text = text or f"[аудио{audio_info}]"
-        elif message.poll:
-            media_kind = "poll"
-            opts = [o.text for o in message.poll.options]
-            text = format_poll_stub(message.poll.question, opts)
-        elif message.dice:
-            media_kind = "dice"
-            text = format_dice_stub(message.dice.emoji, message.dice.value)
-        elif message.contact:
-            media_kind = "contact"
-            text = "[контакт]"
-        elif message.location or message.venue:
-            media_kind = "location"
-            text = "[геопозиция]"
+        if media_ext.text_stub:
+            text = text or media_ext.text_stub
 
         # Check media caps BEFORE downloading
         media_allowed = True
@@ -360,6 +395,17 @@ class FunnyBotApp:
             self.proactive.on_ping_reply_sent()
         else:
             self.ping_detector.record_other_message()
+            # Background P2 media auto-analysis per R7
+            if media_kind and file_id and file_unique_id and media_allowed:
+                asyncio.create_task(
+                    self._auto_process_background_media(
+                        chat_id=chat.id,
+                        media_kind=media_kind,
+                        file_id=file_id,
+                        file_unique_id=file_unique_id,
+                        caption=message.caption
+                    )
+                )
             # 9. Check Proactive if not muted
             now = time.time()
             if now > self.muted_until:
@@ -532,6 +578,44 @@ class FunnyBotApp:
             reply_to_message_id=message.message_id, priority="P0",
         )
 
+    async def _auto_process_background_media(
+        self,
+        chat_id: int,
+        media_kind: str,
+        file_id: str,
+        file_unique_id: str,
+        caption: Optional[str] = None
+    ) -> None:
+        """Background P2 auto-analysis of media files per R7 (MEDIA_AUTO_ANALYZE_P)."""
+        import random
+        # Check cache first
+        cached = await self.db.get_media_cache(file_unique_id)
+        if cached:
+            return
+
+        prob_map = getattr(self.bot_cfg, "MEDIA_AUTO_ANALYZE_P", {}) or {}
+        p = prob_map.get(media_kind, 0.0)
+        if random.random() > p:
+            return
+
+        download_path = Path(f"/tmp/smesh-{file_unique_id}")
+        try:
+            tg_file = await self.bot.get_file(file_id)
+            if tg_file.file_path:
+                await self.bot.download_file(tg_file.file_path, destination=download_path)
+                await self.media_analyzer.analyze_media_step1(
+                    file_path=download_path,
+                    kind=media_kind,
+                    file_unique_id=file_unique_id,
+                    caption=caption,
+                    priority="P2"
+                )
+                logger.info("Background P2 analyzed and cached media %s (%s)", file_unique_id, media_kind)
+        except Exception as e:
+            logger.warning("Background media analysis failed for %s: %s", file_unique_id, e)
+        finally:
+            download_path.unlink(missing_ok=True)
+
     async def _process_ping(
         self,
         message: types.Message,
@@ -544,32 +628,78 @@ class FunnyBotApp:
         media_cache_item = None
         asyncio.create_task(self.sender.send_chat_action(chat_id, "typing"))
 
-        # If media is present, do Step 1 media_analyze
-        if media_kind and file_id and file_unique_id:
-            download_path = Path(f"/tmp/smesh-{file_unique_id}")
-            try:
-                tg_file = await self.bot.get_file(file_id)
-                if tg_file.file_path:
-                    await self.bot.download_file(tg_file.file_path, destination=download_path)
-                    media_cache_item = await self.media_analyzer.analyze_media_step1(
-                        file_path=download_path,
-                        kind=media_kind,
-                        file_unique_id=file_unique_id,
-                        caption=message.caption,
-                        priority="P0"
-                    )
-            except Exception as e:
-                logger.error("Error downloading/analyzing media: %s", e)
-            finally:
-                download_path.unlink(missing_ok=True)
+        # 1. Resolve media: check current message, and if absent, check reply_to_message!
+        target_kind = media_kind
+        target_file_id = file_id
+        target_file_unique_id = file_unique_id
+        target_caption = message.caption
 
-        # Assemble context
-        mode = "media_reply" if media_cache_item else "ping"
+        if not target_file_unique_id and message.reply_to_message:
+            reply_media = extract_media_info(message.reply_to_message)
+            if reply_media.file_unique_id:
+                target_kind = reply_media.media_kind
+                target_file_id = reply_media.file_id
+                target_file_unique_id = reply_media.file_unique_id
+                target_caption = reply_media.caption
+
+        # 2. Analyze media if present
+        if target_file_unique_id:
+            media_cache_item = await self.db.get_media_cache(target_file_unique_id)
+            if not media_cache_item and target_file_id and target_kind:
+                download_path = Path(f"/tmp/smesh-{target_file_unique_id}")
+                try:
+                    tg_file = await self.bot.get_file(target_file_id)
+                    if tg_file.file_path:
+                        await self.bot.download_file(tg_file.file_path, destination=download_path)
+                        media_cache_item = await self.media_analyzer.analyze_media_step1(
+                            file_path=download_path,
+                            kind=target_kind,
+                            file_unique_id=target_file_unique_id,
+                            caption=target_caption,
+                            priority="P0"
+                        )
+                except Exception as e:
+                    logger.error("Error downloading/analyzing media for ping: %s", e)
+                finally:
+                    download_path.unlink(missing_ok=True)
+
+        # 3. Check Research (force triggers or soft triggers)
+        text = (msg_dict.get("text") or "").strip()
+        need_search = False
+        safe_query = None
+        sources_text = None
+        show_links = self.research.should_show_links(text)
+
+        if self.research.should_force_search(text) or self.research.should_soft_search(text):
+            last_msgs = await self.db.get_last_messages(chat_id, limit=10)
+            history_lines = [f"{m.get('nick', 'User')}: {m.get('text', '')}" for m in last_msgs if m.get("text")]
+            history_str = "\n".join(history_lines)
+            known_nicks = [m.get("nick") for m in last_msgs if m.get("nick")]
+
+            need_search, safe_query = await self.research.decide_search(
+                history_text=history_str,
+                current_text=text,
+                known_nicks=known_nicks
+            )
+
+        if need_search and safe_query:
+            sources_text = f"[n=1 | Поиск в сети | query: {safe_query}]\nАктуальные данные получены через веб-поиск"
+
+        # 4. Mode determination
+        if media_cache_item:
+            mode = "media_reply"
+        elif need_search:
+            mode = "research"
+        else:
+            mode = "ping"
+
+        # 5. Assemble context
         step2_media_json = None
         if media_cache_item:
-            # Per Point 3: strictly omit raw transcript and ocr_text to prevent injection propagation!
+            summary_val = media_cache_item.get("summary") or ""
             step2_data = {
                 "kind": media_cache_item.get("kind"),
+                "summary": summary_val[:300],  # Include summary per TB-15
                 "verdict": media_cache_item.get("verdict"),
                 "score100": media_cache_item.get("score100"),
                 "score_reason": media_cache_item.get("score_reason"),
@@ -580,11 +710,17 @@ class FunnyBotApp:
             }
             step2_media_json = json.dumps(step2_data, ensure_ascii=False)
 
+        request_attrs = f'mode="{mode}"'
+        if mode == "research":
+            request_attrs += f' show_links="{"true" if show_links else "false"}"'
+
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
             current_msg=msg_dict,
             mode=mode,
-            media_json=step2_media_json
+            media_json=step2_media_json,
+            sources_text=sources_text,
+            request_attrs=request_attrs,
         )
 
         reply_raw = None
@@ -599,6 +735,7 @@ class FunnyBotApp:
                 priority="P0",
                 response_schema=PersonaTextReply,
                 estimated_tokens=700,
+                enable_search=bool(need_search),
                 session_id=f"tg_{chat_id}"
             )
 

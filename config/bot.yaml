@@ -72,9 +72,9 @@ STYLE_EXAMPLES_N: 8
 STYLE_FILTER_BATCH: 30
 
 # Research
-SEARCH_FORCE_TRIGGERS: ["загугли", "погугли", "ресерч", "пруф", "чекни"]
+SEARCH_FORCE_TRIGGERS: ["загугли", "погугли", "прогугли", "ресерч", "ресёрч", "поищи", "новости", "пруф", "чекни"]
 LINK_TRIGGERS: ["что за", "о чём", "пруф", "суть"]
-LINK_TRIGGERS_SHOW: ["загугли", "пруф", "дай ссылку", "источник"]
+LINK_TRIGGERS_SHOW: ["загугли", "прогугли", "пруф", "дай ссылку", "источник"]
 RESEARCH_TTL_H: 72
 RESEARCH_CACHE_MAX: 1000
 

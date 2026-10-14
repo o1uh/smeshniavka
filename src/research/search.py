@@ -51,12 +51,38 @@ class ResearchModule:
         self.prompts = prompt_builder
 
     def should_force_search(self, text: str) -> bool:
-        t_low = text.lower()
-        return any(trig in t_low for trig in self.config.SEARCH_FORCE_TRIGGERS)
+        t_low = text.lower().replace("ё", "е")
+        for trig in self.config.SEARCH_FORCE_TRIGGERS:
+            trig_norm = trig.lower().replace("ё", "е")
+            if trig_norm in t_low:
+                return True
+        return False
+
+    def should_soft_search(self, text: str) -> bool:
+        t_low = text.lower().replace("ё", "е")
+        soft_phrases = (
+            "что случилось",
+            "что произошло",
+            "в связи с",
+            "последние события",
+            "последние новости",
+            "какие новости",
+            "правда ли",
+            "что за новость",
+            "что там с",
+            "кто такой",
+            "что такое",
+            "поясни за",
+        )
+        return any(phrase in t_low for phrase in soft_phrases)
 
     def should_show_links(self, text: str) -> bool:
-        t_low = text.lower()
-        return any(trig in t_low for trig in self.config.LINK_TRIGGERS_SHOW)
+        t_low = text.lower().replace("ё", "е")
+        for trig in self.config.LINK_TRIGGERS_SHOW:
+            trig_norm = trig.lower().replace("ё", "е")
+            if trig_norm in t_low:
+                return True
+        return False
 
     async def decide_search(
         self,
@@ -88,11 +114,16 @@ class ResearchModule:
             estimated_tokens=200
         )
 
-        if not dec_result or not dec_result.need_search:
+        need_search = (dec_result.need_search if dec_result else False) or forced
+        if not need_search:
             return False, None
 
-        raw_query = dec_result.query or current_text
+        raw_query = (dec_result.query if dec_result and dec_result.query else current_text)
         safe_query = anonymize_query(raw_query, known_nicks)
+        if not safe_query and forced:
+            # Fallback for forced search: strip commands/mentions and use current text
+            safe_query = anonymize_query(current_text, known_nicks)
+
         if not safe_query:
             logger.info("Search query could not be anonymized, skipping search")
             return False, None
