@@ -33,4 +33,4 @@ style_filter:
   max_output_tokens: 2000
 research_decide:
   temperature: 0.1
-  max_output_tokens: 200
+  max_output_tokens: 600

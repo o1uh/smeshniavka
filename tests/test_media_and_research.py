@@ -206,3 +206,25 @@ def test_convert_contents_with_search_query_directive():
     assert messages[0]["content"] == "SysPrompt"
     assert messages[1]["content"] == "в чем мем"
 
+
+def test_verify_and_patch_reply_score_audio_vs_photo():
+    from src.media.analyzer import MediaAnalyzer
+    analyzer = MediaAnalyzer(bot_config=MagicMock(), db_manager=MagicMock(), gateway=MagicMock(), prompt_builder=MagicMock())
+
+    # Audio should get score appended if missing
+    audio_item = {"kind": "audio", "score100": 85, "score_reason": "крутой бит"}
+    res_audio = analyzer.verify_and_patch_reply_score("нормальный трек", audio_item)
+    assert "85/100 — крутой бит" in res_audio
+
+    # Photo should NEVER get score appended even if score100 was in cache
+    photo_item = {"kind": "photo", "score100": 70, "score_reason": "забавный кроссовер"}
+    res_photo = analyzer.verify_and_patch_reply_score("обычный шизокроссовер", photo_item)
+    assert "/100" not in res_photo
+    assert res_photo == "обычный шизокроссовер"
+
+    # Photo should have any hallucinated score stripped
+    res_photo_hallucinated = analyzer.verify_and_patch_reply_score("обычный шизокроссовер\n70/100 — круто", photo_item)
+    assert "/100" not in res_photo_hallucinated
+    assert "70/100" not in res_photo_hallucinated
+
+

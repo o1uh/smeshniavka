@@ -180,8 +180,8 @@ class MediaAnalyzer:
             "track_meta": json.dumps(analysis_obj.track_meta.model_dump(), ensure_ascii=False) if analysis_obj.track_meta else None,
             "tags": json.dumps(analysis_obj.tags, ensure_ascii=False),
             "verdict": analysis_obj.verdict,
-            "score100": analysis_obj.score100,
-            "score_reason": analysis_obj.score_reason,
+            "score100": analysis_obj.score100 if kind == "audio" else None,
+            "score_reason": analysis_obj.score_reason if kind == "audio" else None,
             "unintelligible": 1 if analysis_obj.unintelligible else 0,
             "injection_suspected": 1 if analysis_obj.injection_suspected else 0,
         }
@@ -194,7 +194,14 @@ class MediaAnalyzer:
         Step 2 post-processing per R3/TB-07:
         Checks that reply has N/100 matching the cache. If missing and score100 is present
         (and unintelligible/injection_suspected are False), appends N/100 + reason.
+        IMPORTANT: Scores (N/100) are ONLY allowed for audio tracks.
+        For all other media (photo, video, meme, sticker, voice), scores are strictly prohibited.
         """
+        kind = media_cache_item.get("kind")
+        if kind != "audio":
+            # For non-audio media, remove any hallucinated N/100 score and NEVER append a score!
+            return SCORE_PATTERN.sub("", reply_text).strip()
+
         score100 = media_cache_item.get("score100")
         unintelligible = bool(media_cache_item.get("unintelligible"))
         injection = bool(media_cache_item.get("injection_suspected"))

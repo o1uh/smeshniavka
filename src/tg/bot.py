@@ -820,11 +820,14 @@ class FunnyBotApp:
             # Filter block comeback
             reply_raw = "Не, эту хуйню я озвучивать не буду."
 
-        # If media reply, strip any boilerplate and verify/patch N/100 score
+        # If media reply, strip any boilerplate and verify/patch N/100 score ONLY for audio
         if is_media_mode and isinstance(reply_raw, str):
             reply_raw = clean_media_reply_boilerplate(reply_raw)
-            if media_cache_item:
+            if media_cache_item and media_cache_item.get("kind") == "audio":
                 reply_raw = self.media_analyzer.verify_and_patch_reply_score(reply_raw, media_cache_item)
+            else:
+                from src.media.analyzer import SCORE_PATTERN
+                reply_raw = SCORE_PATTERN.sub("", reply_raw).strip()
 
         final_text = await self._resolve_aliases_to_text(chat_id, str(reply_raw))
         await self.send_queue.enqueue(
