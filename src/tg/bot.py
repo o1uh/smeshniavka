@@ -42,6 +42,14 @@ from src.tg.filters import RuntimeChatResolver, check_media_caps
 from src.ops.alerts import AlertManager
 
 
+def to_iso_date(dt_or_ts: Any) -> str:
+    if isinstance(dt_or_ts, (int, float)):
+        return datetime.fromtimestamp(dt_or_ts, tz=timezone.utc).isoformat()
+    if isinstance(dt_or_ts, datetime):
+        return dt_or_ts.astimezone(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
 @dataclass
 class ExtractedMedia:
     media_kind: Optional[str] = None
@@ -236,7 +244,7 @@ class FunnyBotApp:
                 chat.id,
                 message.message_id,
                 text,
-                message.edit_date.isoformat() if message.edit_date else message.date.isoformat(),
+                to_iso_date(message.edit_date if message.edit_date is not None else message.date),
             )
         except Exception as e:
             logger.warning("Failed to update edited message %s/%s: %s", chat.id, message.message_id, e)
@@ -362,7 +370,7 @@ class FunnyBotApp:
             "file_unique_id": file_unique_id,
             "reply_to": reply_to_mid,
             "reply_to_user_id": reply_to_uid,
-            "created_at": message.date.astimezone(timezone.utc).isoformat(),
+            "created_at": to_iso_date(message.date),
         }
 
         # Save to database
