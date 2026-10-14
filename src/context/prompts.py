@@ -79,6 +79,17 @@ class PromptBuilder:
         res = res.replace("<<CHUNK_SUMMARY_TOK>>", str(chunk_summary_tok))
 
         # 2. Escape any '<<' or '>>' inside style examples so they can never expand placeholders
+        if style_examples is None:
+            style_yaml_path = self.prompts_dir / "style_examples.yaml"
+            if style_yaml_path.exists():
+                try:
+                    import yaml
+                    data = yaml.safe_load(style_yaml_path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and "examples" in data and isinstance(data["examples"], list):
+                        style_examples = data["examples"]
+                except Exception:
+                    pass
+
         formatted_examples = ""
         if style_examples:
             escaped_examples = []
