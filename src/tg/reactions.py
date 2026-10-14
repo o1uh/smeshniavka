@@ -10,12 +10,18 @@ from typing import Optional
 
 
 class ReactionsTracker:
-    """Считает смеющиеся реакции по сообщениям, отдаёт прайм-сигнал."""
+    """Считает смеющиеся реакции по сообщениям, отдаёт сигналы банку стиля.
+
+    3+ distinct смеяк — сразу в банк (минуя очередь и фильтр: смех чата
+    и есть вердикт, «бум» с 4 смеяками фильтр бы выкинул как «без контекста»).
+    1–2 смеяки — в очередь на отбор (обычный путь через style_filter).
+    Срабатывание — один раз на сообщение, снятие не откатывает (без флэппинга).
+    """
 
     def __init__(
         self,
         laugh_emojis: Optional[set[str]] = None,
-        threshold: int = 4,
+        threshold: int = 3,
         max_tracked: int = 1000,
     ):
         self.laugh = set(laugh_emojis) if laugh_emojis else {"😁", "😂", "🤣", "😆", "😹", "🤭"}
@@ -23,7 +29,8 @@ class ReactionsTracker:
         self.max_tracked = max(100, max_tracked)
         # (chat_id, message_id) -> {user_id: set(emoji)}
         self._tally: OrderedDict[tuple[int, int], dict[int, set[str]]] = OrderedDict()
-        self._primed: set[tuple[int, int]] = set()
+        self._banked: set[tuple[int, int]] = set()
+        self._queued: set[tuple[int, int]] = set()
 
     def laugh_count(self, chat_id: int, message_id: int) -> int:
         users = self._tally.get((chat_id, message_id), {})
@@ -35,10 +42,13 @@ class ReactionsTracker:
         message_id: int,
         user_id: Optional[int],
         emojis: set[str],
-    ) -> bool:
-        """Применить изменение реакций юзера. True — только что набрался порог."""
+    ) -> Optional[str]:
+        """Применить изменение реакций юзера.
+
+        Возвращает "bank" (3+, fire-once), "queue" (1–2, fire-once) или None.
+        """
         if user_id is None:
-            return False  # анонимку не считаем (не дедуплицировать)
+            user_id = 0  # аноним — один голос
         key = (chat_id, message_id)
         users = self._tally.get(key)
         if users is None:
@@ -46,7 +56,8 @@ class ReactionsTracker:
             self._tally[key] = users
             if len(self._tally) > self.max_tracked:
                 old_key, _ = self._tally.popitem(last=False)
-                self._primed.discard(old_key)
+                self._banked.discard(old_key)
+                self._queued.discard(old_key)
         else:
             self._tally.move_to_end(key)
         if emojis:
@@ -55,9 +66,13 @@ class ReactionsTracker:
             users.pop(user_id, None)
         if not users:
             self._tally.pop(key, None)
-        if key in self._primed:
-            return False
+        if key in self._banked:
+            return None
         if self.laugh_count(chat_id, message_id) >= self.threshold:
-            self._primed.add(key)
-            return True
-        return False
+            self._banked.add(key)
+            self._queued.discard(key)
+            return "bank"
+        if key not in self._queued and self.laugh_count(chat_id, message_id) >= 1:
+            self._queued.add(key)
+            return "queue"
+        return None

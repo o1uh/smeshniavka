@@ -142,13 +142,16 @@ class BotConfig(BaseModel):
     STYLE_MIN_LEN: int = 6
     STYLE_MAX_LEN: int = 150
     STYLE_EXAMPLES_MAX: int = 128
+    # Пермач банка стиля (не вытесняется): дефолт «бум», правится на RPi/конфигом
+    STYLE_PINNED_SEEDS: list[str] = Field(default_factory=lambda: ["бум"])
 
     # Research
     SEARCH_FORCE_TRIGGERS: list[str] = Field(
         default_factory=lambda: ["загугли", "погугли", "ресерч", "пруф", "чекни"]
     )
-    # Смеяки как сигнал качества для банка стиля
-    REACT_LAUGH_THRESHOLD: int = 4
+    # Смеяки как сигнал качества для банка стиля:
+    # 3+ distinct — сразу в банк-пермач, 1–2 — в очередь на отбор
+    REACT_LAUGH_THRESHOLD: int = 3
     REACT_LAUGH_EMOJIS: list[str] = Field(
         default_factory=lambda: ["😁", "😂", "🤣", "😆", "😹", "🤭"]
     )

@@ -265,7 +265,7 @@ class FunnyBotApp:
             logger.warning("Failed to save outgoing message %s/%s: %s", chat_id, message_id, e)
 
     async def handle_reaction(self, event: Any) -> None:
-        """Смеяки 4+ distinct — прайм-кандидат в банк стиля (текст из БД)."""
+        """Смеяки: 3+ distinct — сразу в банк, 1–2 — в очередь на отбор."""
         try:
             chat = event.chat
             if not self.chat_resolver.is_allowed(chat.id):
@@ -275,16 +275,18 @@ class FunnyBotApp:
                 if getattr(r, "type", None) == "emoji" and getattr(r, "emoji", None):
                     emojis.add(r.emoji)
             user = getattr(event, "user", None)
-            primed = self.reactions.handle(
+            signal = self.reactions.handle(
                 chat.id, event.message_id,
                 getattr(user, "id", None), emojis,
             )
-            if not primed:
+            if not signal:
                 return
             row = await self.db.get_message(chat.id, event.message_id)
             if not row or not (row.get("text") or "").strip():
                 return
-            await self.style_learner.collect_prime(chat.id, row.get("user_id"), row.get("text"))
+            await self.style_learner.collect_reacted(
+                chat.id, row.get("user_id"), row.get("text"), direct=(signal == "bank"),
+            )
         except Exception as e:
             logger.warning("Reaction handling failed: %s", e)
 

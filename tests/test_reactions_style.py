@@ -10,30 +10,33 @@ from src.db.contracts import FakeSender
 from src.persona.reply import TgSendQueue
 
 
-def test_laugh_threshold_fires_once():
-    tr = ReactionsTracker(threshold=4)
-    for uid in (1, 2, 3):
-        assert tr.handle(1, 10, uid, {"😁"}) is False
-    assert tr.handle(1, 10, 4, {"😁"}) is True
-    # повторный апдейт — уже прайм, молчим
-    assert tr.handle(1, 10, 5, {"😂"}) is False
-    assert tr.laugh_count(1, 10) == 5
+def test_laugh_threshold_bank_and_queue():
+    tr = ReactionsTracker(threshold=3)
+    assert tr.handle(1, 10, 1, {"😁"}) == "queue"  # 1 смеяка — в очередь
+    assert tr.handle(1, 10, 2, {"😁"}) is None  # 2 — уже в очереди, молчим
+    assert tr.handle(1, 10, 3, {"😁"}) == "bank"  # 3 — сразу в банк
+    # повторный апдейт — уже в банке, молчим
+    assert tr.handle(1, 10, 4, {"😂"}) is None
+    assert tr.laugh_count(1, 10) == 4
 
 
 def test_removal_and_non_laugh_ignored():
     tr = ReactionsTracker(threshold=2)
-    assert tr.handle(1, 10, 1, {"😁"}) is False
-    assert tr.handle(1, 10, 2, {"👍"}) is False  # не смеяка — не считаем
+    assert tr.handle(1, 10, 1, {"😁"}) == "queue"
+    assert tr.handle(1, 10, 2, {"👍"}) is None  # не смеяка — не считаем
     assert tr.laugh_count(1, 10) == 1
-    assert tr.handle(1, 10, 1, set()) is False  # снял реакцию
+    assert tr.handle(1, 10, 1, set()) is None  # снял реакцию
     assert tr.laugh_count(1, 10) == 0
-    assert tr.handle(1, 10, 2, {"🤣"}) is False
-    assert tr.handle(1, 10, 3, {"😆"}) is True
+    # в очередь уже сигналили — дубль не кладём, ждём порог банка
+    assert tr.handle(1, 10, 2, {"🤣"}) is None
+    assert tr.handle(1, 10, 3, {"😆"}) == "bank"
 
 
-def test_anonymous_skipped():
-    tr = ReactionsTracker(threshold=1)
-    assert tr.handle(1, 10, None, {"😁"}) is False
+def test_anonymous_counts_as_single_vote():
+    tr = ReactionsTracker(threshold=3)
+    assert tr.handle(1, 10, None, {"😁"}) == "queue"
+    assert tr.handle(1, 10, 1, {"😁"}) is None
+    assert tr.handle(1, 10, 2, {"😁"}) == "bank"
 
 
 class FakeDB:
@@ -101,13 +104,47 @@ async def test_eviction_fifo_fallback_on_filter_fail(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_prime_goes_first(tmp_path):
+async def test_reacted_queue_short_words(tmp_path):
+    """1–2 смеяки: короткое «вау»/«бум» уходит в очередь (обычный префильтр бы не взял)."""
     learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=30)
     assert await learner.collect_from_message(1, 5, "обычная фраза из чата") is True
-    assert await learner.collect_prime(1, 7, "хуюл") is True
+    assert await learner.collect_reacted(1, 7, "вау", direct=False) is True
     data = yaml.safe_load((tmp_path / "style_examples.candidates.yaml").read_text(encoding="utf-8"))
-    assert data["candidates"][0]["text"] == "хуюл"
-    assert data["candidates"][0].get("prime") is True
+    assert any(c["text"] == "вау" for c in data["candidates"])
+
+
+@pytest.mark.asyncio
+async def test_reacted_direct_to_bank_evictable(tmp_path):
+    """3+ смеяки: сразу в банк, но НЕ пермач — слабый вылетает при чистке."""
+    learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=30)
+    assert await learner.collect_reacted(1, 7, "бум еблан", direct=True) is True
+    data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
+    assert "бум еблан" in (data.get("examples") or [])
+    assert "бум еблан" not in (data.get("pinned") or [])
+    # повтор — уже в банке
+    assert await learner.collect_reacted(1, 7, "бум еблан", direct=True) is False
+    # а при чистке вылетает на общих основаниях (фильтр его забраковал)
+    learner.gateway = FakeGateway(ok_map={"e0": True, "e1": False})
+    await learner._apply_weakest_eviction(["бум", "бум еблан"], 2)
+    data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
+    assert "бум еблан" not in (data.get("examples") or [])
+    assert "бум" in (data.get("pinned") or [])  # пермач-сид на месте
+
+
+@pytest.mark.asyncio
+async def test_pinned_seeds_and_eviction_keeps_pinned(tmp_path):
+    """Сид «бум» появляется сам; вытеснение пермач не трогает."""
+    learner = _learner(tmp_path, FakeGateway(fail=True), max_active=2, batch=10)
+    (tmp_path / "style_examples.yaml").write_text(
+        yaml.safe_dump({"examples": ["первый", "второй", "третий"]}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    learner._ensure_seeds()
+    await learner._apply_weakest_eviction(["первый", "второй", "третий", "бум"], 2)
+    data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
+    # фильтр лёг → FIFO по examples, но сид пермача уже в файле
+    assert "бум" in (data.get("pinned") or [])
+    assert data["examples"] == ["второй", "третий"]
 
 
 @pytest.mark.asyncio

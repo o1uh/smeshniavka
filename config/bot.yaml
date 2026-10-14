@@ -96,11 +96,14 @@ STYLE_LEARN_ENABLED: true
 STYLE_MIN_LEN: 6
 STYLE_MAX_LEN: 150
 STYLE_EXAMPLES_MAX: 128
+# Пермач банка стиля (не вытесняется)
+STYLE_PINNED_SEEDS: ["бум"]
 
 # Research
 SEARCH_FORCE_TRIGGERS: ["загугли", "погугли", "прогугли", "ресерч", "ресёрч", "поищи", "новости", "пруф", "чекни"]
-# Смеяки как сигнал качества для банка стиля (прайм-кандидаты)
-REACT_LAUGH_THRESHOLD: 4
+# Смеяки как сигнал качества для банка стиля (прайм-кандидаты):
+# 3+ distinct — сразу в банк-пермач, 1–2 — в очередь на отбор
+REACT_LAUGH_THRESHOLD: 3
 REACT_LAUGH_EMOJIS: ["😁", "😂", "🤣", "😆", "😹", "🤭"]
 LINK_TRIGGERS: ["что за", "о чём", "пруф", "суть"]
 LINK_TRIGGERS_SHOW: ["загугли", "прогугли", "пруф", "дай ссылку", "источник"]

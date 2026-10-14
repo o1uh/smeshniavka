@@ -86,8 +86,11 @@ class PromptBuilder:
                 try:
                     import yaml
                     data = yaml.safe_load(style_yaml_path.read_text(encoding="utf-8"))
-                    if isinstance(data, dict) and "examples" in data and isinstance(data["examples"], list):
-                        style_examples = data["examples"]
+                    if isinstance(data, dict):
+                        bank = [e for e in (data.get("examples") or []) if isinstance(e, str)]
+                        # Пермач (pinned) — всегда в пуле сэмплинга
+                        bank += [p for p in (data.get("pinned") or []) if isinstance(p, str) and p not in bank]
+                        style_examples = bank or None
                 except Exception:
                     pass
 

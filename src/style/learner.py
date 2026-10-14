@@ -90,6 +90,27 @@ class StyleLearner:
             logger.warning("Style learner: failed to read %s: %s", path, e)
             return []
 
+    def _pinned_seeds(self) -> list[str]:
+        seeds = getattr(self.config, "STYLE_PINNED_SEEDS", None) or []
+        return [str(s) for s in seeds if str(s).strip()]
+
+    def _read_active(self, path: Path) -> tuple[list[str], list[str]]:
+        """(examples, pinned): пермач отдельно, вытеснение его не касается."""
+        examples = [a for a in self._read_yaml_list(path, "examples") if isinstance(a, str)]
+        pinned = [a for a in self._read_yaml_list(path, "pinned") if isinstance(a, str)]
+        return examples, pinned
+
+    def _ensure_seeds(self) -> None:
+        """Сиды пермача (дефолт «бум») — дописать в файл один раз, если их там нет."""
+        seeds = self._pinned_seeds()
+        if not seeds:
+            return
+        _, active_path = self._paths()
+        examples, pinned = self._read_active(active_path)
+        missing = [s for s in seeds if s not in pinned and s not in examples]
+        if missing:
+            self._write_yaml(active_path, {"examples": examples, "pinned": pinned + missing})
+
     def _write_yaml(self, path: Path, payload: dict) -> bool:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,11 +147,12 @@ class StyleLearner:
             return False
 
         async with self._lock:
+            self._ensure_seeds()
             cand_path, active_path = self._paths()
             candidates = self._read_yaml_list(cand_path, "candidates")
-            active = self._read_yaml_list(active_path, "examples")
+            examples, pinned = self._read_active(active_path)
             known = {c.get("text") for c in candidates if isinstance(c, dict)}
-            known |= {a for a in active if isinstance(a, str)}
+            known |= set(examples) | set(pinned)
             if clean in known:
                 return False
             cid = f"c{int(time.time())}{random.randint(100, 999)}"
@@ -142,19 +164,24 @@ class StyleLearner:
             logger.info("Style learner: candidate collected (%.40s...)", clean)
         return ok
 
-    async def collect_prime(
-        self, chat_id: int, user_id: Optional[int], text: Optional[str]
+    async def collect_reacted(
+        self, chat_id: int, user_id: Optional[int], text: Optional[str], direct: bool = False
     ) -> bool:
-        """Прайм-кандидат по смеякам (4+): в начало очереди, на разбор первым.
+        """Кандидат по смеякам.
 
-        Фильтр пропустит всё равно (PII/вред отсекается там), но префильтр
-        мягче — короткое вроде «бум» с 4 смеяками тоже deserve a look.
+        direct=True (3+ смеяк): сразу в банк, минуя очередь и фильтр — смех чата
+        и есть вердикт (фильтр бы «бум» выкинул как «без контекста»). Но это
+        НЕ пермач: при переполнении вытесняется на общих основаниях, пермач —
+        только сиды. Безопасность кодовая: PII-маска, без ссылок/упоминаний.
+        direct=False (1–2 смеяки): в очередь на отбор обычным путём,
+        но префильтр мягче — короткое «бум»/«вау» тоже смотрим.
         """
         if not self.enabled or not text:
             return False
         max_len = int(getattr(self.config, "STYLE_MAX_LEN", 150) or 150)
+        max_active = int(getattr(self.config, "STYLE_EXAMPLES_MAX", 128) or 128)
         clean = scrub_pii(text.strip())
-        # Прайм по смеякам: одиночное «бум»/«хуюл» с 4 смеяками тоже смотрим
+        # Прайм по смеякам: одиночное «бум»/«вау» со смеяками тоже смотрим
         if not prefilter_ok(clean, min_len=2, max_len=max_len, allow_single=True):
             return False
         if user_id:
@@ -165,20 +192,38 @@ class StyleLearner:
                 return False
 
         async with self._lock:
+            self._ensure_seeds()
             cand_path, active_path = self._paths()
-            candidates = self._read_yaml_list(cand_path, "candidates")
-            active = self._read_yaml_list(active_path, "examples")
-            known = {c.get("text") for c in candidates if isinstance(c, dict)}
-            known |= {a for a in active if isinstance(a, str)}
-            if clean in known:
-                return False
-            cid = f"p{int(time.time())}{random.randint(100, 999)}"
-            candidates.insert(0, {"id": cid, "text": clean, "ts": int(time.time()), "prime": True})
-            candidates = candidates[:200]
-            ok = self._write_yaml(cand_path, {"candidates": candidates})
-        if ok:
-            logger.warning("Style learner: PRIME candidate by laughs (%.40s...)", clean)
-        return ok
+            examples, pinned = self._read_active(active_path)
+            if direct:
+                if clean in set(examples) | set(pinned):
+                    return False
+                examples.append(clean)
+                self._write_yaml(active_path, {"examples": examples, "pinned": pinned})
+                # В банке — из кандидатов убрать дубль
+                candidates = self._read_yaml_list(cand_path, "candidates")
+                candidates = [c for c in candidates if c.get("text") != clean]
+                self._write_yaml(cand_path, {"candidates": candidates})
+                over = len(examples) > max_active
+                logger.warning("Style learner: DIRECT to bank by laughs (%.40s...)", clean)
+            else:
+                candidates = self._read_yaml_list(cand_path, "candidates")
+                known = {c.get("text") for c in candidates if isinstance(c, dict)}
+                known |= set(examples) | set(pinned)
+                if clean in known:
+                    return False
+                cid = f"c{int(time.time())}{random.randint(100, 999)}"
+                candidates.append({"id": cid, "text": clean, "ts": int(time.time())})
+                candidates = candidates[-200:]
+                ok = self._write_yaml(cand_path, {"candidates": candidates})
+                over = False
+                if ok:
+                    logger.info("Style learner: reacted candidate queued (%.40s...)", clean)
+                return ok
+        # Переполнение прямым добавлением — сразу чистим слабых, не ждём промоушна
+        if over:
+            await self._apply_weakest_eviction(examples, max_active)
+        return True
 
     async def maybe_promote(self) -> int:
         """Прогнать полный батч кандидатов через style_filter и дописать ok в актив.
@@ -190,6 +235,7 @@ class StyleLearner:
         batch_n = int(getattr(self.config, "STYLE_FILTER_BATCH", 30) or 30)
         max_active = int(getattr(self.config, "STYLE_EXAMPLES_MAX", 128) or 128)
         async with self._lock:
+            self._ensure_seeds()
             cand_path, active_path = self._paths()
             candidates = self._read_yaml_list(cand_path, "candidates")
             if len(candidates) < batch_n:
@@ -231,6 +277,7 @@ class StyleLearner:
         ok_texts = [c.get("text") for c in batch if c.get("id") in ok_ids and c.get("text")]
 
         async with self._lock:
+            self._ensure_seeds()
             cand_path, active_path = self._paths()
             candidates = self._read_yaml_list(cand_path, "candidates")
             done_ids = {c.get("id") for c in batch}
@@ -239,18 +286,18 @@ class StyleLearner:
             added = 0
             need_evict = False
             if ok_texts:
-                active = [a for a in self._read_yaml_list(active_path, "examples") if isinstance(a, str)]
-                have = set(active)
+                examples, pinned = self._read_active(active_path)
+                have = set(examples) | set(pinned)
                 for t in ok_texts:
                     if t not in have:
-                        active.append(t)
+                        examples.append(t)
                         have.add(t)
                         added += 1
-                if len(active) > max_active:
+                if len(examples) > max_active:
                     need_evict = True
-                    evict_snapshot = list(active)
+                    evict_snapshot = list(examples)
                 else:
-                    self._write_yaml(active_path, {"examples": active})
+                    self._write_yaml(active_path, {"examples": examples, "pinned": pinned})
 
         # Переполнение: слабых выкидываем вне лока (там сетевые вызовы),
         # иначе сбор кандидатов встанет на время фильтрации всего банка
@@ -261,22 +308,25 @@ class StyleLearner:
         return added
 
     async def _apply_weakest_eviction(self, snapshot: list[str], max_active: int) -> None:
-        """Выкинуть слабые примеры из переполненного банка (см. _filter_weak)."""
+        """Выкинуть слабые примеры из переполненного банка (см. _filter_weak).
+
+        Пермач (pinned) не трогаем никогда.
+        """
         weak = await self._filter_weak(snapshot)
         async with self._lock:
             _, active_path = self._paths()
-            active = [a for a in self._read_yaml_list(active_path, "examples") if isinstance(a, str)]
+            examples, pinned = self._read_active(active_path)
             if weak is None:
                 # Фильтр лёг — честный FIFO
-                active = active[-max_active:] if max_active > 0 else []
+                examples = examples[-max_active:] if max_active > 0 else []
             else:
-                dropped = len([t for t in active if t in weak])
-                active = [t for t in active if t not in weak]
+                dropped = len([t for t in examples if t in weak])
+                examples = [t for t in examples if t not in weak]
                 if dropped:
                     logger.info("Style learner: evicting %d weakest examples", dropped)
-                if len(active) > max_active:
-                    active = active[-max_active:] if max_active > 0 else []
-            self._write_yaml(active_path, {"examples": active})
+                if len(examples) > max_active:
+                    examples = examples[-max_active:] if max_active > 0 else []
+            self._write_yaml(active_path, {"examples": examples, "pinned": pinned})
 
     async def _filter_weak(self, active: list[str]) -> Optional[set[str]]:
         """Прогнать банк через style_filter. Возвращает тексты слабых или None при ошибке."""
