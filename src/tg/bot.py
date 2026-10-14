@@ -110,6 +110,8 @@ class FunnyBotApp:
 
     def _setup_handlers(self) -> None:
         self.dp.message.register(self.handle_message)
+        self.dp.edited_message.register(self.handle_edited_message)
+        self.dp.my_chat_member.register(self.handle_my_chat_member)
 
     async def initialize(self) -> None:
         me = await self.bot.get_me()
@@ -118,6 +120,52 @@ class FunnyBotApp:
         self.ping_detector = PingDetector(self.bot_username, self.bot_id, self.bot_cfg)
         self.send_queue.start()
         logger.info("Bot initialized: @%s (id=%d)", self.bot_username, self.bot_id)
+
+    async def handle_edited_message(self, message: types.Message) -> None:
+        """TB-03: edit обновляет текст в БД, без ответов и без P1."""
+        chat = message.chat
+        if not self.chat_resolver.is_allowed(chat.id):
+            return
+        text = message.text or message.caption or ""
+        try:
+            await self.db.update_message_text(
+                chat.id,
+                message.message_id,
+                text,
+                message.edit_date.isoformat() if message.edit_date else message.date.isoformat(),
+            )
+        except Exception as e:
+            logger.warning("Failed to update edited message %s/%s: %s", chat.id, message.message_id, e)
+
+    async def handle_my_chat_member(self, event: types.ChatMemberUpdated) -> None:
+        """I3/C6: чужой чат со статусом member/administrator — немедленный leaveChat."""
+        chat = event.chat
+        try:
+            new_status = event.new_chat_member.status
+        except Exception:
+            return
+        if self.chat_resolver.is_allowed(chat.id):
+            return
+        if str(new_status) not in ("member", "administrator", "creator"):
+            return
+        inviting_id = None
+        try:
+            inviting_id = event.from_user.id if event.from_user else None
+        except Exception:
+            pass
+        logger.warning(
+            "Bot added to foreign chat %s (%s) by %s. Leaving...",
+            chat.id, getattr(chat, "title", ""), inviting_id,
+        )
+        await self.db.add_foreign_chat(chat.id, getattr(chat, "title", ""))
+        try:
+            await self.bot.leave_chat(chat.id)
+        except Exception:
+            pass
+        await self.alert_mgr.send_alert(
+            "FOREIGN_CHAT_LEFT",
+            f"Бот добавлен в посторонний чат {chat.id} и покинул его.",
+        )
 
     async def handle_message(self, message: types.Message) -> None:
         chat = message.chat
@@ -357,6 +405,10 @@ class FunnyBotApp:
             await message.reply(f"Твой псевдоним: <code>{alias}</code>\nID: <code>{user_id}</code>")
             return True
 
+        elif text.startswith("/who"):
+            await self._process_who(message, msg_dict, text)
+            return True
+
         elif text.startswith("/forget me") and user_id:
             await self.db.set_opt_out(message.chat.id, user_id)
             await self.db.delete_dossier(message.chat.id, user_id)
@@ -397,6 +449,88 @@ class FunnyBotApp:
             return True
 
         return False
+
+    async def _process_who(
+        self, message: types.Message, msg_dict: dict[str, Any], text: str
+    ) -> None:
+        """R12/TB-05: /who — роаст/сводка по досье (mode_who, P0)."""
+        import random
+
+        chat_id = message.chat.id
+        target_arg = text[len("/who"):].strip().lstrip("@").lower()
+        target_uid: Optional[int] = None
+        target_alias = "all"
+
+        # Цель: реплай > алиас uN > ник из last60 > все
+        if message.reply_to_message and message.reply_to_message.from_user:
+            target_uid = message.reply_to_message.from_user.id
+            target_alias = f"u{target_uid}"
+        elif target_arg:
+            last_msgs = await self.db.get_last_messages(chat_id, limit=60)
+            for m in last_msgs:
+                if (m.get("alias") or "").lower() == target_arg or (
+                    m.get("nick") or ""
+                ).lower().startswith(target_arg):
+                    target_uid = m.get("user_id")
+                    target_alias = m.get("alias") or f"u{target_uid}"
+                    break
+
+        # opt_out цели — без API, статика
+        if target_uid and await self.db.is_opt_out(chat_id, target_uid):
+            excuse = (
+                random.choice(self.config.persona.opt_out_replies)
+                if self.config.persona.opt_out_replies
+                else "Про него ничего нет."
+            )
+            await self.send_queue.enqueue(chat_id, excuse, message.message_id, priority="P0")
+            return
+
+        who_msg = dict(msg_dict)
+        if target_uid:
+            who_msg["reply_to_user_id"] = target_uid
+        system_instruction, contents = await self.assembler.assemble(
+            chat_id=chat_id,
+            current_msg=who_msg,
+            mode="who",
+            request_attrs=f'target="{target_alias}"',
+        )
+        res = await self.gateway.generate(
+            prompt_name="persona_who",
+            contents=contents,
+            system_instruction=system_instruction,
+            priority="P0",
+            response_schema=PersonaTextReply,
+            estimated_tokens=400,
+            session_id=f"tg_{chat_id}",
+        )
+        candidate = res.reply.strip() if isinstance(res, PersonaTextReply) else (
+            res.strip() if isinstance(res, str) and res.strip() else ""
+        )
+        is_valid, _ = validate_persona_reply(candidate, is_media=False)
+        if not candidate or not is_valid:
+            # Одна repair-попытка тем же приоритетом (I11), затем молчи
+            res2 = await self.gateway.generate(
+                prompt_name="persona_who",
+                contents=contents,
+                system_instruction=system_instruction,
+                priority="P0",
+                response_schema=PersonaTextReply,
+                estimated_tokens=400,
+                session_id=f"tg_{chat_id}",
+            )
+            candidate2 = res2.reply.strip() if isinstance(res2, PersonaTextReply) else (
+                res2.strip() if isinstance(res2, str) and res2.strip() else ""
+            )
+            ok2, _ = validate_persona_reply(candidate2, is_media=False)
+            if not candidate2 or not ok2:
+                logger.warning("Outgoing guard: /who dropped after repair, not sending raw.")
+                return
+            candidate = candidate2
+        final_text = await self._resolve_aliases_to_text(chat_id, candidate)
+        await self.send_queue.enqueue(
+            chat_id=chat_id, text=final_text,
+            reply_to_message_id=message.message_id, priority="P0",
+        )
 
     async def _process_ping(
         self,

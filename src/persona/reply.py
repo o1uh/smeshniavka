@@ -21,11 +21,13 @@ class PingDetector:
         self.last_bot_reply_to_user: Optional[int] = None
         self.last_bot_reply_time: float = 0.0
         self.messages_since_last_reply: int = 0
+        self._followup_done: bool = False
 
     def record_bot_reply(self, target_user_id: int) -> None:
         self.last_bot_reply_to_user = target_user_id
         self.last_bot_reply_time = time.time()
         self.messages_since_last_reply = 0
+        self._followup_done = False
 
     def record_other_message(self) -> None:
         self.messages_since_last_reply += 1
@@ -50,15 +52,18 @@ class PingDetector:
                 if clean_w.startswith(alias):
                     return True
 
-        # 4. Follow-up window
+        # 4. Follow-up: только reply на сообщение бота в окне (R1):
+        # тот же автор, <=1 чужого между, цепочка не продлевается
         now = time.time()
         if (
             self.followup_window_s > 0
             and user_id == self.last_bot_reply_to_user
+            and msg.get("reply_to_user_id") == self.bot_id
             and (now - self.last_bot_reply_time) <= self.followup_window_s
-            and self.messages_since_last_reply <= 3
-            and not msg.get("reply_to_user_id")  # Not replying to someone else
+            and self.messages_since_last_reply <= 1
+            and not self._followup_done
         ):
+            self._followup_done = True
             return True
 
         return False
