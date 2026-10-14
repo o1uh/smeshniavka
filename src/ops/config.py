@@ -67,6 +67,26 @@ class BotConfig(BaseModel):
     BUDGET_P2_MAX: int = 70
     BUDGET_P1_MAX: int = 90
 
+    # Lane workers: chat (default talk) / track (audio) / media (rest).
+    # Sum should stay <= MAX_CONCURRENT so one slow gif can't eat the chat.
+    CHAT_MAX_CONCURRENT: int = 2
+    TRACK_MAX_CONCURRENT: int = 1
+    MEDIA_MAX_CONCURRENT: int = 1
+    WORKER_QUEUE_MAX: int = 30
+    # Per-lane bridge timeouts (chat is latency-critical, media may be slow)
+    CHAT_TIMEOUT_S: float = 35.0
+    TRACK_TIMEOUT_S: float = 50.0
+    MEDIA_TIMEOUT_S: float = 75.0
+    # Human-like typing keepalive during long generations
+    TYPING_KEEPALIVE_S: float = 4.0
+    # Media preprocessing before base64 upload to the bridge
+    PHOTO_MAX_DIM: int = 1280
+    PHOTO_JPEG_Q: int = 72
+    VIDEO_MAX_S: int = 20
+    VIDEO_HEIGHT: int = 480
+    ANIM_MAX_S: int = 4
+    ANIM_HEIGHT: int = 480
+
     # Ping policy
     PING_LIMIT: int = 20
     PING_WINDOW_S: int = 60
