@@ -120,7 +120,7 @@ class ProvocationDetector:
         t = (reply or "").strip()
         if not t:
             return False
-        if len(t) > 140:
+        if len(t) > 120:
             return False
         frags = [f for f in re.split(r"[.?!]+", t) if f.strip()]
         if len(frags) >= 2:

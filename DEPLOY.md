@@ -86,6 +86,7 @@ python -m src.tools.import_history summary+dossier
 ## 7. Бэкап и восстановление
 
 - Бэкап SQLite — внутри приложения (asyncio-задача, `VACUUM INTO`, раз в сутки, хранить 7 шт. в `backups/`). Cron не нужен.
+- Живой банк стиля (`prompts/style_examples.yaml`, `prompts/style_examples.candidates.yaml`) деплой не затирает (исключения в `deploy.sh`), бот дописывает их сам; при желании правится вручную.
 - Восстановление: остановить бота, затем `python -m src.tools.restore <file>` (путь из `backups/`), запустить снова.
 - `data/`, `reports/`, `backups/` — права 700; логи/репорты — 600.
 

@@ -131,7 +131,8 @@ class ContextAssembler:
             now_str=now_str,
             style_examples=style_examples,
             summary_tok=self.bot_config.SUMMARY_TOK,
-            chunk_summary_tok=self.bot_config.CHUNK_SUMMARY_TOK
+            chunk_summary_tok=self.bot_config.CHUNK_SUMMARY_TOK,
+            style_examples_n=self.bot_config.STYLE_EXAMPLES_N,
         )
 
         # 2. Summary

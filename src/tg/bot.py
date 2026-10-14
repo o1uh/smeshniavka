@@ -32,6 +32,7 @@ from src.media.analyzer import MediaAnalyzer, contains_forbidden_score, SCORE_PA
 from src.research.search import ResearchModule
 from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA
 from src.antijob.detector import ProvocationDetector
+from src.style.learner import StyleLearner
 from src.tg.stubs import (
     format_sticker_stub,
     format_animation_stub,
@@ -213,6 +214,7 @@ class FunnyBotApp:
         self.dossier_worker = DossierWorker(self.bot_cfg, self.db, self.gateway, self.prompts)
         self.media_analyzer = MediaAnalyzer(self.bot_cfg, self.db, self.gateway, self.prompts)
         self.research = ResearchModule(self.bot_cfg, self.db, self.gateway, self.prompts)
+        self.style_learner = StyleLearner(self.bot_cfg, self.db, self.gateway)
 
         self.ping_detector: Optional[PingDetector] = None
         self.bot_id = 0
@@ -481,6 +483,27 @@ class FunnyBotApp:
                 logger.warning("Background dossier failed: %s", e)
 
         asyncio.create_task(_dossier_bg())
+
+        # 11. Живой банк стиля — фоном: фраза участника в кандидаты + промоушн батча.
+        # Чужих ботов не учим (иначе потащим чужие шаблоны), команды и медиа-стабы режет префильтр.
+        _from_bot = False
+        try:
+            _from_bot = bool(getattr(message.from_user, "is_bot", False))
+        except Exception:
+            pass
+        if user_id and not _from_bot and text and not media_kind:
+            async def _style_bg(
+                chat_id: int = chat.id,
+                uid: int = user_id,
+                t: str = text,
+            ):
+                try:
+                    if await self.style_learner.collect_from_message(chat_id, uid, t):
+                        await self.style_learner.maybe_promote()
+                except Exception as e:
+                    logger.warning("Background style learn failed: %s", e)
+
+            asyncio.create_task(_style_bg())
 
     async def _handle_commands(self, message: types.Message, msg_dict: dict[str, Any]) -> bool:
         text = (msg_dict.get("text") or "").strip()

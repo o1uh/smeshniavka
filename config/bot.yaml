@@ -88,6 +88,11 @@ CLAIM_MIN_COUNT: 3
 DOSSIER_SLICES_MAX: 5
 STYLE_EXAMPLES_N: 8
 STYLE_FILTER_BATCH: 30
+# Живой банк стиля: сбор фраз чата в кандидаты + промоушн через style_filter
+STYLE_LEARN_ENABLED: true
+STYLE_MIN_LEN: 6
+STYLE_MAX_LEN: 150
+STYLE_EXAMPLES_MAX: 32
 
 # Research
 SEARCH_FORCE_TRIGGERS: ["загугли", "погугли", "прогугли", "ресерч", "ресёрч", "поищи", "новости", "пруф", "чекни"]

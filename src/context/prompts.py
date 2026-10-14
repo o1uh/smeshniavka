@@ -55,6 +55,7 @@ class PromptBuilder:
         style_examples: Optional[list[str]] = None,
         summary_tok: int = 800,
         chunk_summary_tok: int = 300,
+        style_examples_n: Optional[int] = None,
     ) -> str:
         """
         Builds system instruction according to TB-15:
@@ -92,8 +93,15 @@ class PromptBuilder:
 
         formatted_examples = ""
         if style_examples:
+            # Живой банк: каждый вызов — случайная подвыборка N (разнообразие),
+            # иначе застывшие сиды дают застывшие ответы
+            picks = list(style_examples)
+            if style_examples_n and len(picks) > style_examples_n:
+                import random as _random
+
+                picks = _random.sample(picks, style_examples_n)
             escaped_examples = []
-            for ex in style_examples:
+            for ex in picks:
                 safe_ex = str(ex).replace("<<", "&lt;&lt;").replace(">>", "&gt;&gt;")
                 escaped_examples.append(f"- {safe_ex}")
             formatted_examples = "\n".join(escaped_examples)

@@ -49,6 +49,8 @@ rsync -avz --delete -e "${RSYNC_RSH}" \
     --exclude 'logs/***' \
     --exclude 'reports/***' \
     --exclude 'backups/***' \
+    --exclude 'prompts/style_examples.yaml' \
+    --exclude 'prompts/style_examples.candidates.yaml' \
     ./ "${RPI_HOST}:${REMOTE_DIR}/"
 
 # 3. Подготовка структуры и запуск Docker Compose

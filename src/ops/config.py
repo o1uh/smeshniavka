@@ -134,6 +134,11 @@ class BotConfig(BaseModel):
     DOSSIER_SLICES_MAX: int = 5
     STYLE_EXAMPLES_N: int = 8
     STYLE_FILTER_BATCH: int = 30
+    # Живой банк стиля (дообучения модели нет — только few-shot примеры)
+    STYLE_LEARN_ENABLED: bool = True
+    STYLE_MIN_LEN: int = 6
+    STYLE_MAX_LEN: int = 150
+    STYLE_EXAMPLES_MAX: int = 32
 
     # Research
     SEARCH_FORCE_TRIGGERS: list[str] = Field(
