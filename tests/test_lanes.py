@@ -83,7 +83,10 @@ def test_gateway_lane_mapping():
     assert gw.lane_for_prompt("research_decide") == "chat"
     assert gw.lane_for_prompt("persona_media_reply") == "media"
     assert gw.lane_for_prompt("media_analyze") == "media"
-    assert gw.lane_for_prompt("dossier_extract") == "media"
+    assert gw.lane_for_prompt("dossier_extract") == "sys"
+    assert gw.lane_for_prompt("style_filter") == "sys"
+    assert gw.lane_for_prompt("summary_chunk") == "sys"
     # явный lane побеждает
     assert gw.lane_for_prompt("media_analyze", lane="track") == "track"
     assert gw.lane_for_prompt("persona_media_reply", lane="track") == "track"
+    assert gw.lane_for_prompt("persona_ping", lane="sys") == "sys"

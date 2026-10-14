@@ -129,7 +129,7 @@ class DossierWorker:
             ]
         )
 
-        # 5. Call Gateway with P2 priority (фон — media-лейн, чат не трогаем)
+        # 5. Call Gateway with P2 priority (фон — sys-лейн, юзерские чат/медиа не трогаем)
         result: Optional[DossierExtract] = await self.gateway.generate(
             prompt_name="dossier_extract",
             contents=contents,
@@ -137,7 +137,7 @@ class DossierWorker:
             priority="P2",
             response_schema=DossierExtract,
             estimated_tokens=3000,
-            lane="media",
+            lane="sys",
         )
 
         if not result:

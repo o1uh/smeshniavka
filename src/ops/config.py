@@ -72,11 +72,14 @@ class BotConfig(BaseModel):
     CHAT_MAX_CONCURRENT: int = 2
     TRACK_MAX_CONCURRENT: int = 1
     MEDIA_MAX_CONCURRENT: int = 1
+    # System lane: background P2 (dossier, style_filter) — не душит юзерскую медийку
+    SYS_MAX_CONCURRENT: int = 1
     WORKER_QUEUE_MAX: int = 30
     # Per-lane bridge timeouts (chat is latency-critical, media may be slow)
     CHAT_TIMEOUT_S: float = 35.0
     TRACK_TIMEOUT_S: float = 50.0
     MEDIA_TIMEOUT_S: float = 75.0
+    SYS_TIMEOUT_S: float = 75.0
     # Human-like typing keepalive during long generations
     TYPING_KEEPALIVE_S: float = 4.0
     # Media preprocessing before base64 upload to the bridge
@@ -138,7 +141,7 @@ class BotConfig(BaseModel):
     STYLE_LEARN_ENABLED: bool = True
     STYLE_MIN_LEN: int = 6
     STYLE_MAX_LEN: int = 150
-    STYLE_EXAMPLES_MAX: int = 32
+    STYLE_EXAMPLES_MAX: int = 128
 
     # Research
     SEARCH_FORCE_TRIGGERS: list[str] = Field(

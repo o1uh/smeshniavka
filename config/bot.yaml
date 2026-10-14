@@ -22,10 +22,13 @@ BUDGET_P1_MAX: 90
 CHAT_MAX_CONCURRENT: 2
 TRACK_MAX_CONCURRENT: 1
 MEDIA_MAX_CONCURRENT: 1
+# System lane: фон P2 (досье, style_filter)
+SYS_MAX_CONCURRENT: 1
 WORKER_QUEUE_MAX: 30
 CHAT_TIMEOUT_S: 35.0
 TRACK_TIMEOUT_S: 50.0
 MEDIA_TIMEOUT_S: 75.0
+SYS_TIMEOUT_S: 75.0
 TYPING_KEEPALIVE_S: 4.0
 # Media preprocessing перед отправкой на мост
 PHOTO_MAX_DIM: 1280
@@ -92,7 +95,7 @@ STYLE_FILTER_BATCH: 30
 STYLE_LEARN_ENABLED: true
 STYLE_MIN_LEN: 6
 STYLE_MAX_LEN: 150
-STYLE_EXAMPLES_MAX: 32
+STYLE_EXAMPLES_MAX: 128
 
 # Research
 SEARCH_FORCE_TRIGGERS: ["загугли", "погугли", "прогугли", "ресерч", "ресёрч", "поищи", "новости", "пруф", "чекни"]

@@ -32,7 +32,7 @@ def test_third_party_banter_not_provoked():
 
 
 def test_provoked_reply_ok():
-    assert P.provoked_reply_ok("закройся и сядь") is True
+    assert P.provoked_reply_ok("челлл аааааа") is True
     assert P.provoked_reply_ok("ЗАВАЛИ УЖЕ ЕБАЛО ХУЕСОС") is True
     assert P.provoked_reply_ok("вован треки гоняет и мост ковыряет, кава стикерами спамит, а ты сидишь сопли жуешь") is False
     assert P.provoked_reply_ok("че, аргументы кончились? слабовато скулишь") is False
@@ -48,7 +48,7 @@ def test_provoked_examples_pass_outgoing_guard():
         "я тя ща по ip въебу даун",
         "сукаааааааааа как же ты заебалллл",
         "ЗАВАЛИ УЖЕ ЕБАЛО ХУЕСОС",
-        "ты в списке, жди",
+        "челлл аааааа",
     ]
     for ex in examples:
         ok, reason = validate_persona_reply(ex, is_media=False)

@@ -150,7 +150,7 @@ class StyleLearner:
         if not self.enabled:
             return 0
         batch_n = int(getattr(self.config, "STYLE_FILTER_BATCH", 30) or 30)
-        max_active = int(getattr(self.config, "STYLE_EXAMPLES_MAX", 32) or 32)
+        max_active = int(getattr(self.config, "STYLE_EXAMPLES_MAX", 128) or 128)
         async with self._lock:
             cand_path, active_path = self._paths()
             candidates = self._read_yaml_list(cand_path, "candidates")
@@ -177,7 +177,7 @@ class StyleLearner:
                 priority="P2",
                 response_schema=StyleVerdicts,
                 estimated_tokens=2000,
-                lane="media",
+                lane="sys",
             )
         except Exception as e:
             logger.warning("Style learner: filter call failed: %s", e)
