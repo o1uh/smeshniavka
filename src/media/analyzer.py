@@ -71,6 +71,12 @@ class MediaAnalyzer:
                 "-c:a", "aac", "-b:a", "64k",
                 str(out_path)
             ]
+        elif kind == "sticker":
+            out_path = out_path.with_suffix(".jpg")
+            cmd = [
+                "ffmpeg", "-y", "-i", str(input_path),
+                str(out_path)
+            ]
         else:
             return input_path
 
@@ -122,6 +128,7 @@ class MediaAnalyzer:
             "video_note": "video/mp4",
             "photo": "image/jpeg",
             "animation": "video/mp4",
+            "sticker": "image/jpeg",
         }
         mime_type = mime_type_map.get(kind, "application/octet-stream")
 
@@ -140,7 +147,8 @@ class MediaAnalyzer:
         ]
         if caption:
             parts.append({"text": f"<caption>{caption}</caption>"})
-        parts.append({"text": f'<request kind="{kind}"/>'})
+        req_kind = "photo" if kind == "sticker" else kind
+        parts.append({"text": f'<request kind="{req_kind}"/>'})
 
         contents = [{"role": "user", "parts": parts}]
 

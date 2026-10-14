@@ -98,6 +98,68 @@ def test_extract_media_info_voice():
     assert info.text_stub == "[войс]"
 
 
+def test_extract_media_info_sticker_static():
+    msg = MagicMock()
+    msg.animation = None
+    msg.photo = None
+    msg.voice = None
+    msg.video_note = None
+    msg.video = None
+    msg.audio = None
+    msg.caption = None
+    sticker = MagicMock(
+        file_unique_id="stk_uniq",
+        file_id="stk_fid",
+        file_size=2048,
+        emoji="😎",
+        set_name="CoolPack",
+        is_animated=False,
+        is_video=False,
+        thumbnail=None
+    )
+    msg.sticker = sticker
+
+    info = extract_media_info(msg)
+    assert info.media_kind == "sticker"
+    assert info.file_id == "stk_fid"
+    assert info.file_unique_id == "stk_uniq"
+    assert info.file_size == 2048
+    assert "😎" in (info.text_stub or "")
+
+
+def test_extract_media_info_sticker_animated_with_thumb():
+    msg = MagicMock()
+    msg.animation = None
+    msg.photo = None
+    msg.voice = None
+    msg.video_note = None
+    msg.video = None
+    msg.audio = None
+    msg.caption = None
+    thumb = MagicMock(
+        file_unique_id="thumb_uniq",
+        file_id="thumb_fid",
+        file_size=1024
+    )
+    sticker = MagicMock(
+        file_unique_id="anim_stk_uniq",
+        file_id="anim_stk_fid",
+        file_size=50000,
+        emoji="🔥",
+        set_name="AnimPack",
+        is_animated=True,
+        is_video=False,
+        thumbnail=thumb
+    )
+    msg.sticker = sticker
+
+    info = extract_media_info(msg)
+    assert info.media_kind == "sticker"
+    assert info.file_id == "thumb_fid"
+    assert info.file_unique_id == "thumb_uniq"
+    assert info.file_size == 1024
+
+
 def test_research_triggers():
     cfg = BotConfig()
     cfg.SEARCH_FORCE_TRIGGERS = ["ресёрч", "поищи", "прогугли", "новости"]

@@ -64,6 +64,14 @@ def extract_media_info(message: types.Message) -> ExtractedMedia:
     if message.sticker:
         media_kind = "sticker"
         text_stub = format_sticker_stub(message.sticker.emoji, message.sticker.set_name)
+        if (getattr(message.sticker, "is_animated", False) or getattr(message.sticker, "is_video", False)) and getattr(message.sticker, "thumbnail", None):
+            file_unique_id = message.sticker.thumbnail.file_unique_id
+            file_id = message.sticker.thumbnail.file_id
+            file_size = getattr(message.sticker.thumbnail, "file_size", 0) or 0
+        else:
+            file_unique_id = message.sticker.file_unique_id
+            file_id = message.sticker.file_id
+            file_size = getattr(message.sticker, "file_size", 0) or 0
     elif message.animation:
         media_kind = "animation"
         file_unique_id = message.animation.file_unique_id
@@ -395,17 +403,6 @@ class FunnyBotApp:
             self.proactive.on_ping_reply_sent()
         else:
             self.ping_detector.record_other_message()
-            # Background P2 media auto-analysis per R7
-            if media_kind and file_id and file_unique_id and media_allowed:
-                asyncio.create_task(
-                    self._auto_process_background_media(
-                        chat_id=chat.id,
-                        media_kind=media_kind,
-                        file_id=file_id,
-                        file_unique_id=file_unique_id,
-                        caption=message.caption
-                    )
-                )
             # 9. Check Proactive if not muted
             now = time.time()
             if now > self.muted_until:
