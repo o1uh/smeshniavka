@@ -14,6 +14,10 @@ class PersonaTextReply(BaseModel):
     reply: str
 
 
+# Канон спеки TB-15/R13 — PersonaReply; PersonaTextReply — то же (совместимость)
+PersonaReply = PersonaTextReply
+
+
 class ProactiveDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

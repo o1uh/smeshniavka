@@ -9,11 +9,24 @@ TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z0-9_-]+)([^>]*)>")
 UN_RE = re.compile(r"\b(u\d+)\b")
 USER_ID_RE = re.compile(r"\b\d{8,12}\b")
 
-# Outgoing Leak Guards per user requirement
+# Outgoing Leak Guards per I11/R3
 # Patterns: Анализ трека: | Правила поведения | Контекст: | "action".*"reply" | Role: | Goal:
 LEAK_PATTERN = re.compile(
-    r"(анализ трека\s*:|правила поведения|контекст\s*:|\"action\"\s*.*\"reply\"|role\s*:|goal\s*:)",
+    r"(анализ трека\s*:|исполнитель\s*:|правила поведения|контекст\s*:|\"action\"\s*.*\"reply\"|role\s*:|goal\s*:)",
     re.IGNORECASE | re.DOTALL
+)
+
+# I11/R3: голые uN, @username, tg://-ссылки в исходящих запрещены всегда
+MENTION_PATTERN = re.compile(
+    r"(\bu\d+\b|@\w+|tg://\S+|<a\s+href=\"tg://[^>]*>)",
+    re.IGNORECASE
+)
+
+# I11/R2: извинения и лесть запрещены (точные фразы I11; голое «понял» вне
+# «понял извини» — обычное слово, не баним, иначе ложняки вида «сам-то понял?»)
+FLATTERY_PATTERN = re.compile(
+    r"(понял\s+извини|извини(сь)?|прости(те)?|больше не буду|отличный вопрос|ты прав|согласен|как ии|надеюсь[,\s]+помог)",
+    re.IGNORECASE
 )
 
 # For mode_media_reply: forbid words Исполнитель / Жанр / Правила in outgoing reply
@@ -25,13 +38,19 @@ MEDIA_FORBIDDEN_PATTERN = re.compile(
 
 def has_persona_leak(text: str, is_media: bool = False) -> bool:
     """
-    Checks if model output contains internal prompt/reasoning leaks:
-    - Анализ трека: | Правила поведения | Контекст: | "action".*"reply" | Role: | Goal:
-    - For media replies: also checks for forbidden words Исполнитель | Жанр | Правила
+    I11/R3: исходящий гард — дамп/маркеры, упоминания, лесть.
+    - Анализ трека: | Исполнитель: | Правила поведения | Контекст: | "action".*"reply" | Role: | Goal:
+    - голые uN, @username, tg:// (всегда, is_media не важен)
+    - извинения/лесть (понял извини, ты прав, отличный вопрос, ...)
+    - для медиа: также Жанр:/Правила: (is_media=True)
     """
     if not text:
         return False
     if LEAK_PATTERN.search(text):
+        return True
+    if MENTION_PATTERN.search(text):
+        return True
+    if FLATTERY_PATTERN.search(text):
         return True
     if is_media and MEDIA_FORBIDDEN_PATTERN.search(text):
         return True
@@ -95,9 +114,9 @@ def validate_persona_reply(
 
     text = reply.strip()
 
-    # 1. Length check
-    if len(text) > max_chars:
-        return False, f"Reply length {len(text)} exceeds limit {max_chars}"
+    # 1. Length check (I11: 1–2000 символов)
+    if len(text) < 1 or len(text) > max_chars:
+        return False, f"Reply length {len(text)} outside 1-{max_chars}"
 
     # 2. Structural tokens: [], {}, <request>, prompt tags, code fences
     if STRUCTURAL_DUMP_RE.search(text):
@@ -119,6 +138,11 @@ def validate_persona_reply(
     list_matches = BULLET_LIST_RE.findall(text)
     if len(list_matches) >= 2:
         return False, "Contains list formatting (dump sign)"
+
+    # 7. I11: списки 3+ строк с двоеточием (field-value dump)
+    colon_lines = sum(1 for line in text.split("\n") if ":" in line)
+    if colon_lines >= 3:
+        return False, "Contains 3+ colon lines (dump sign)"
 
     return True, None
 
@@ -168,10 +192,10 @@ def strip_all_tags(text: str) -> str:
 
 def replace_un_aliases(text: str, user_mapping: dict[str, dict[str, Any]]) -> str:
     """
-    Replaces uN pseudonyms (e.g. u3) with member mention or clean nick:
-    - if member has username: @username
-    - else: <a href="tg://user?id=123">Nick</a>
-    - strips remaining unresolved uN references.
+    I7/R3: остатки uN/@username/tg:// вырезать, НЕ превращать в упоминание.
+    - известный uN -> короткий ник plain-текстом (без фамилии-ссылки)
+    - неизвестный uN -> вырезать
+    - @username / tg://user -> вырезать
     """
     if not text:
         return ""
@@ -181,18 +205,15 @@ def replace_un_aliases(text: str, user_mapping: dict[str, dict[str, Any]]) -> st
         user_info = user_mapping.get(alias)
         if not user_info:
             return ""  # Cut unresolved uN
-
-        username = user_info.get("username")
-        user_id = user_info.get("user_id")
-        nick = user_info.get("nick") or alias
-
-        if username:
-            return f"@{username.lstrip('@')}"
-        elif user_id:
-            return f'<a href="tg://user?id={user_id}">{nick}</a>'
-        return nick
+        nick = (user_info.get("nick") or alias).strip()
+        # Только короткий ник plain-текстом, без упоминаний
+        return nick.split()[0] if nick else ""
 
     res = UN_RE.sub(replace_match, text)
+    # Вырезать @username и tg://-ссылки наружу (I7: запрещены всегда)
+    res = re.sub(r"@\w+", "", res)
+    res = re.sub(r'<a\s+href="tg://[^"]*">.*?</a>', "", res, flags=re.IGNORECASE | re.DOTALL)
+    res = re.sub(r"tg://\S+", "", res)
     # Never leak raw numeric user_ids
     res = USER_ID_RE.sub("[id]", res)
     return res

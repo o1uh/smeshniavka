@@ -13,7 +13,7 @@ def test_all_modules_and_bytecode_globals():
     for root, dirs, files in os.walk("src"):
         for file in files:
             if file.endswith(".py") and not file.startswith("__pycache__"):
-                mod_path = os.path.relpath(os.path.join(root, file), ".").replace("/", ".").replace(".py", "")
+                mod_path = os.path.relpath(os.path.join(root, file), ".").replace("/", ".").replace("\\", ".").replace(".py", "")
                 try:
                     mod = importlib.import_module(mod_path)
                 except Exception as e:

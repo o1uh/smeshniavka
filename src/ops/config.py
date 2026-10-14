@@ -75,16 +75,16 @@ class BotConfig(BaseModel):
     RATE_NOTICE_COOLDOWN_S: int = 120
     TG_SEND_PER_MIN: int = 18
     TG_SEND_QUEUE_MAX: int = 100
-    FOLLOWUP_WINDOW_S: int = 45
+    FOLLOWUP_WINDOW_S: int = 20
 
     # Proactive policy
-    PROACTIVE_MIN: int = 10
-    PROACTIVE_MAX: int = 25
-    RANDOM_P: float = 0.15
+    PROACTIVE_MIN: int = 30
+    PROACTIVE_MAX: int = 80
+    RANDOM_P: float = 0.05
     PROACTIVE_ACTIVE_MIN: int = 15
-    COOLDOWN_S: int = 60
-    PROACTIVE_MAX_PER_HOUR: int = 4
-    PROACTIVE_MAX_PER_DAY: int = 15
+    COOLDOWN_S: int = 120
+    PROACTIVE_MAX_PER_HOUR: int = 2
+    PROACTIVE_MAX_PER_DAY: int = 6
     NIGHT_START: str = "03:00"
     NIGHT_END: str = "07:00"
 

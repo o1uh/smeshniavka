@@ -1,6 +1,9 @@
 import argparse
 import asyncio
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows: нет fcntl, лок только на Linux-таргете
+    fcntl = None  # type: ignore
 import os
 import signal
 import subprocess
@@ -107,11 +110,14 @@ async def async_main():
     lock_path = Path("data/bot.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError):
-        logger.error("Another bot instance is running (lock contention on %s)! Exiting with code 75.", lock_path)
-        sys.exit(75)
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            logger.error("Another bot instance is running (lock contention on %s)! Exiting with code 75.", lock_path)
+            sys.exit(75)
+    else:
+        logger.warning("fcntl unavailable (Windows dev) — file lock skipped, only for Linux target.")
 
     # 5. Connect DB and run migrations
     db_mgr = DatabaseManager()
@@ -153,7 +159,7 @@ async def async_main():
 
     # Start Polling
     polling_task = asyncio.create_task(
-        app.dp.start_polling(app.bot, allowed_updates=[UpdateType.MESSAGE, UpdateType.EDITED_MESSAGE])
+        app.dp.start_polling(app.bot, allowed_updates=[UpdateType.MESSAGE, UpdateType.EDITED_MESSAGE, UpdateType.MY_CHAT_MEMBER])
     )
 
     # Wait until stop_event or polling error
@@ -174,7 +180,8 @@ async def async_main():
     app.alert_mgr.write_clean_shutdown_marker()
 
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         lock_file.close()
     except Exception:
         pass
