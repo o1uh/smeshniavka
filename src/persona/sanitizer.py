@@ -168,10 +168,10 @@ def strip_all_tags(text: str) -> str:
 
 def replace_un_aliases(text: str, user_mapping: dict[str, dict[str, Any]]) -> str:
     """
-    Replaces uN pseudonyms (e.g. u3) with member mention or clean nick:
-    - if member has username: @username
-    - else: <a href="tg://user?id=123">Nick</a>
-    - strips remaining unresolved uN references.
+    I7/R3: остатки uN/@username/tg:// вырезать, НЕ превращать в упоминание.
+    - известный uN -> короткий ник plain-текстом (без фамилии-ссылки)
+    - неизвестный uN -> вырезать
+    - @username / tg://user -> вырезать
     """
     if not text:
         return ""
@@ -181,18 +181,15 @@ def replace_un_aliases(text: str, user_mapping: dict[str, dict[str, Any]]) -> st
         user_info = user_mapping.get(alias)
         if not user_info:
             return ""  # Cut unresolved uN
-
-        username = user_info.get("username")
-        user_id = user_info.get("user_id")
-        nick = user_info.get("nick") or alias
-
-        if username:
-            return f"@{username.lstrip('@')}"
-        elif user_id:
-            return f'<a href="tg://user?id={user_id}">{nick}</a>'
-        return nick
+        nick = (user_info.get("nick") or alias).strip()
+        # Только короткий ник plain-текстом, без упоминаний
+        return nick.split()[0] if nick else ""
 
     res = UN_RE.sub(replace_match, text)
+    # Вырезать @username и tg://-ссылки наружу (I7: запрещены всегда)
+    res = re.sub(r"@\w+", "", res)
+    res = re.sub(r'<a\s+href="tg://[^"]*">.*?</a>', "", res, flags=re.IGNORECASE | re.DOTALL)
+    res = re.sub(r"tg://\S+", "", res)
     # Never leak raw numeric user_ids
     res = USER_ID_RE.sub("[id]", res)
     return res
