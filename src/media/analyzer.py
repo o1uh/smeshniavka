@@ -27,6 +27,45 @@ def contains_forbidden_score(reply_text: str, kind: Optional[str]) -> bool:
     return bool(SCORE_PATTERN.search(reply_text or ""))
 
 
+def describe_person(alias: Optional[str], nick: Optional[str]) -> str:
+    """Короткое человекочитаемое «u7 «Петя»» для JSON и логов."""
+    a = (alias or "").strip() or "u0"
+    n = (nick or "").strip() or "Unknown"
+    return f"{a} «{n}»"
+
+
+def build_step2_media_json(
+    media_cache_item: dict[str, Any],
+    sent_by_alias: Optional[str] = None,
+    sent_by_nick: Optional[str] = None,
+    requested_by_alias: Optional[str] = None,
+    requested_by_nick: Optional[str] = None,
+) -> str:
+    """Урезанный JSON разбора для <media> + КТО прислал вложение и КТО просит ответить.
+
+    Различает автора вложения (sent_by) и автора запроса (requested_by):
+    другой чел скинул трек, а ты реплаем попросил оценку — трек не твой.
+    """
+    summary_val = media_cache_item.get("summary") or ""
+    kind = media_cache_item.get("kind")
+    is_audio = (kind == "audio")
+    data = {
+        "kind": kind,
+        "summary": summary_val[:300],
+        "ocr_text": media_cache_item.get("ocr_text")[:300] if media_cache_item.get("ocr_text") else None,
+        "verdict": media_cache_item.get("verdict"),
+        "score100": media_cache_item.get("score100") if is_audio else None,
+        "score_reason": media_cache_item.get("score_reason") if is_audio else None,
+        "track_meta": media_cache_item.get("track_meta"),
+        "tags": media_cache_item.get("tags"),
+        "unintelligible": media_cache_item.get("unintelligible"),
+        "injection_suspected": media_cache_item.get("injection_suspected"),
+        "sent_by": describe_person(sent_by_alias, sent_by_nick),
+        "requested_by": describe_person(requested_by_alias, requested_by_nick),
+    }
+    return json.dumps(data, ensure_ascii=False)
+
+
 class MediaAnalyzer:
     """Manages media normalization with ffmpeg, inline base64 calls to Gemini, caching, and score verification."""
 

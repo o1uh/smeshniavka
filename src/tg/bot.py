@@ -28,7 +28,7 @@ from src.persona.sanitizer import (
 )
 from src.gateway.schemas import PersonaTextReply
 from src.dossier.worker import DossierWorker
-from src.media.analyzer import MediaAnalyzer, contains_forbidden_score, SCORE_PATTERN
+from src.media.analyzer import MediaAnalyzer, contains_forbidden_score, SCORE_PATTERN, build_step2_media_json
 from src.research.search import ResearchModule
 from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA
 from src.tg.stubs import (
@@ -749,6 +749,33 @@ class FunnyBotApp:
                 target_file_unique_id = reply_media.file_unique_id
                 target_caption = reply_media.caption
 
+        # 1b. Чей реплай: снапшот цели из апдейта (покрывает via_bot и старое).
+        # Стабильные alias/ник доберём из БД в gather, текст — из апдейта как fallback.
+        reply_snapshot: Optional[dict[str, Any]] = None
+        reply_to_id = msg_dict.get("reply_to")
+        if reply_to_id and message.reply_to_message:
+            rmsg = message.reply_to_message
+            ruser = getattr(rmsg, "from_user", None)
+            ruid = getattr(ruser, "id", None) if ruser else None
+            if ruid is None:
+                ruid = msg_dict.get("reply_to_user_id")
+            rnick = sanitize_nick(
+                getattr(ruser, "full_name", None) or getattr(getattr(rmsg, "sender_chat", None), "title", None) or "Unknown",
+                max_len=32,
+            )
+            rtext = (getattr(rmsg, "text", None) or getattr(rmsg, "caption", None) or "")
+            if not rtext:
+                try:
+                    rtext = extract_media_info(rmsg).text_stub or ""
+                except Exception:
+                    rtext = ""
+            reply_snapshot = {
+                "message_id": reply_to_id,
+                "user_id": ruid,
+                "alias": f"u{ruid}" if ruid is not None else "u0",
+                "nick": rnick,
+                "text": rtext,
+            }
         # Уточняем лейн по реальной цели (пинг мог быть текстом, а цель — трек/мем)
         if target_kind == "audio":
             lane = LANE_TRACK
@@ -805,7 +832,46 @@ class FunnyBotApp:
             except Exception:
                 return []
 
-        media_cache_item, hint_msgs = await asyncio.gather(_load_media(), _load_hint())
+        async def _load_reply_row():
+            if not reply_to_id:
+                return None
+            try:
+                return await self.db.get_message(chat_id, reply_to_id)
+            except Exception:
+                return None
+
+        media_cache_item, hint_msgs, reply_row = await asyncio.gather(
+            _load_media(), _load_hint(), _load_reply_row()
+        )
+
+        # 2b. Финальный снапшот цели: стабильные alias/ник из БД, текст из БД/апдейта.
+        # Случай из чата: трек скинул другой чел, а ты реплаем попросил оценку —
+        # модель должна видеть, что трек НЕ твой.
+        if reply_to_id:
+            tuid = None
+            talias = None
+            tnick = None
+            ttext = ""
+            if reply_row:
+                tuid = reply_row.get("user_id")
+                talias = reply_row.get("alias") or (f"u{tuid}" if tuid is not None else None)
+                tnick = reply_row.get("nick") or None
+                ttext = reply_row.get("text") or ""
+            if reply_snapshot:
+                tuid = tuid if tuid is not None else reply_snapshot.get("user_id")
+                talias = talias or reply_snapshot.get("alias")
+                tnick = tnick or reply_snapshot.get("nick")
+                if not ttext:
+                    ttext = reply_snapshot.get("text") or ""
+            if tuid is None:
+                tuid = msg_dict.get("reply_to_user_id")
+            reply_snapshot = {
+                "message_id": reply_to_id,
+                "user_id": tuid,
+                "alias": talias or (f"u{tuid}" if tuid is not None else "u0"),
+                "nick": sanitize_nick(tnick or "Unknown", max_len=32),
+                "text": ttext or "",
+            }
 
         # 3. Research: быстрый гейт в коде + LLM только формулирует query
         need_search = False
@@ -852,33 +918,41 @@ class FunnyBotApp:
 
         # 5. Assemble context — полный (history+досье+тред), а не только разбор.
         # Ответ от контекста: кто кинул, что обсуждали, какое досье у автора.
+        # Вложение принадлежит sent_by, просит ответить requested_by — не путать!
         step2_media_json = None
         media_kind_for_guard = None
+        requester_alias = msg_dict.get("alias") or f"u{msg_dict.get('user_id', 0)}"
+        requester_nick = msg_dict.get("nick") or "User"
         if media_cache_item:
-            summary_val = media_cache_item.get("summary") or ""
             media_kind_for_guard = media_cache_item.get("kind")
-            is_audio = (media_kind_for_guard == "audio")
-            step2_data = {
-                "kind": media_kind_for_guard,
-                "summary": summary_val[:300],
-                "ocr_text": media_cache_item.get("ocr_text")[:300] if media_cache_item.get("ocr_text") else None,
-                "verdict": media_cache_item.get("verdict"),
-                "score100": media_cache_item.get("score100") if is_audio else None,
-                "score_reason": media_cache_item.get("score_reason") if is_audio else None,
-                "track_meta": media_cache_item.get("track_meta"),
-                "tags": media_cache_item.get("tags"),
-                "unintelligible": media_cache_item.get("unintelligible"),
-                "injection_suspected": media_cache_item.get("injection_suspected"),
-            }
-            step2_media_json = json.dumps(step2_data, ensure_ascii=False)
+            # Вложение из реплая — автор цели; своё вложение — автор запроса.
+            media_from_reply = bool(reply_snapshot) and not media_kind
+            if media_from_reply and reply_snapshot:
+                sent_alias, sent_nick = reply_snapshot.get("alias"), reply_snapshot.get("nick")
+            else:
+                sent_alias, sent_nick = requester_alias, requester_nick
+            step2_media_json = build_step2_media_json(
+                media_cache_item,
+                sent_by_alias=sent_alias,
+                sent_by_nick=sent_nick,
+                requested_by_alias=requester_alias,
+                requested_by_nick=requester_nick,
+            )
+
+        # Обогащённый current: явная цель реплая для <current> (см. assembler).
+        current_enriched = dict(msg_dict)
+        if reply_snapshot:
+            current_enriched["reply_target"] = reply_snapshot
 
         request_attrs = f'mode="{mode}"'
         if mode == "research":
             request_attrs += f' show_links="{"true" if show_links else "false"}"'
+        if reply_snapshot and reply_snapshot.get("alias"):
+            request_attrs += f' reply_target="{reply_snapshot.get("alias")}"'
 
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
-            current_msg=msg_dict,
+            current_msg=current_enriched,
             mode=mode,
             media_json=step2_media_json,
             sources_text=sources_text,
