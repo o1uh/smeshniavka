@@ -43,6 +43,25 @@ def filter_summary_imperatives(summary_text: Optional[str]) -> str:
     return "\n".join(safe_lines).strip()
 
 
+def _truncate_text(s: Optional[str], n: int) -> str:
+    t = (s or "").replace("\n", " ").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t[:n] if len(t) <= n else t[:n] + "..."
+
+
+def _alias_map_from_messages(msgs: list[dict[str, Any]]) -> dict[Any, tuple[str, str]]:
+    """user_id -> (alias, nick) по видимым сообщениям."""
+    m: dict[Any, tuple[str, str]] = {}
+    for x in msgs:
+        uid = x.get("user_id")
+        if uid is None:
+            continue
+        alias = x.get("alias") or f"u{uid}"
+        nick = sanitize_nick(x.get("nick", "User"), max_len=32)
+        m.setdefault(uid, (alias, nick))
+    return m
+
+
 def format_dossier_slice(dossier_dict: dict[str, Any], max_tokens: int = 300) -> str:
     """
     Formats up to max_tokens of dossier: top stable by count/recency + latest recent.
@@ -126,6 +145,7 @@ class ContextAssembler:
         # 3. Last 60 messages
         last_msgs = await self.db.get_last_messages(chat_id, limit=self.bot_config.CTX_LAST)
         last_msg_ids = {m["message_id"] for m in last_msgs}
+        alias_map = _alias_map_from_messages(last_msgs + [current_msg])
 
         # 4. Thread excerpt if reply_to is outside last 60
         thread_excerpt_block = None
@@ -143,7 +163,7 @@ class ContextAssembler:
 
             thread_lines = []
             for m in sorted_thread:
-                line = self._format_message_line(m)
+                line = self._format_message_line(m, alias_map)
                 thread_lines.append(line)
             if thread_lines:
                 thread_excerpt_block = "\n".join(thread_lines)
@@ -179,16 +199,17 @@ class ContextAssembler:
                 dossier_lines.append(line)
         dossiers_block = "\n".join(dossier_lines) if dossier_lines else None
 
-        # 6. History block
+        # 6. History block (стрелка с автором цели, где известен)
         history_lines = []
         for m in last_msgs:
             if m["message_id"] != current_msg.get("message_id"):
-                line = self._format_message_line(m)
+                line = self._format_message_line(m, alias_map)
                 history_lines.append(line)
         history_block = "\n".join(history_lines) if history_lines else None
 
-        # 7. Current message block
-        current_block = self._format_message_line(current_msg)
+        # 7. Current message block + явная цель реплая (чей реплай, текст цели)
+        reply_target = await self._resolve_reply_target(chat_id, current_msg, last_msgs)
+        current_block = self._format_current_line(current_msg, reply_target, alias_map)
 
         # 8. Assemble contents with I4 order
         contents = PromptBuilder.build_contents(
@@ -204,17 +225,94 @@ class ContextAssembler:
 
         return system_instruction, contents
 
-    def _format_message_line(self, msg: dict[str, Any]) -> str:
+    async def _resolve_reply_target(
+        self,
+        chat_id: int,
+        current_msg: dict[str, Any],
+        last_msgs: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        """Чей реплай: alias/ник/текст цели. Источники: embedded -> last60 -> БД."""
+        reply_to_id = current_msg.get("reply_to")
+        if not reply_to_id:
+            return None
+        # 1. Вложенный снапшот от коллера (покрывает via_bot и вычищенные сообщения)
+        rt = current_msg.get("reply_target")
+        if isinstance(rt, dict) and (rt.get("text") or rt.get("alias") or rt.get("user_id") is not None):
+            uid = rt.get("user_id")
+            alias = rt.get("alias") or (f"u{uid}" if uid is not None else "u0")
+            nick = sanitize_nick(rt.get("nick", "User"), max_len=32)
+            return {
+                "message_id": rt.get("message_id") or reply_to_id,
+                "user_id": uid,
+                "alias": alias,
+                "nick": nick,
+                "text": _truncate_text(rt.get("text") or "", 200),
+            }
+        # 2. Цель внутри last60 — без лишнего запроса
+        for m in last_msgs:
+            if m.get("message_id") == reply_to_id:
+                uid = m.get("user_id")
+                return {
+                    "message_id": reply_to_id,
+                    "user_id": uid,
+                    "alias": m.get("alias") or (f"u{uid}" if uid is not None else "u0"),
+                    "nick": sanitize_nick(m.get("nick", "User"), max_len=32),
+                    "text": _truncate_text(m.get("text") or "", 200),
+                }
+        # 3. Старая цель — один точечный запрос
+        try:
+            row = await self.db.get_message(chat_id, reply_to_id)
+        except Exception:
+            row = None
+        if row:
+            uid = row.get("user_id")
+            return {
+                "message_id": reply_to_id,
+                "user_id": uid,
+                "alias": row.get("alias") or (f"u{uid}" if uid is not None else "u0"),
+                "nick": sanitize_nick(row.get("nick", "User"), max_len=32),
+                "text": _truncate_text(row.get("text") or "", 200),
+            }
+        # 4. Автор известен по id, а текста нет (сообщение вычищено ретеншном)
+        tuid = current_msg.get("reply_to_user_id")
+        if tuid is not None:
+            return {
+                "message_id": reply_to_id,
+                "user_id": tuid,
+                "alias": f"u{tuid}",
+                "nick": "Unknown",
+                "text": "",
+            }
+        return None
+
+    def _format_message_line(
+        self,
+        msg: dict[str, Any],
+        alias_map: Optional[dict[Any, tuple[str, str]]] = None,
+    ) -> str:
         """
         Formats history line: [id|uN|nick] (→id|uM): text
-        Sanitizes nick and text per I9 and scrubs PII if enabled.
+        reply_to_user_id + alias_map дают автора цели (спека), без карты — голый →id.
         """
         msg_id = msg.get("message_id", 0)
         alias = msg.get("alias") or f"u{msg.get('user_id', 0)}"
         nick = sanitize_nick(msg.get("nick", "User"), max_len=32)
 
         reply_to = msg.get("reply_to")
-        reply_part = f" (→{reply_to})" if reply_to else ""
+        reply_part = ""
+        if reply_to:
+            target_alias = None
+            tuid = msg.get("reply_to_user_id")
+            if tuid is not None and alias_map:
+                hit = alias_map.get(tuid)
+                if hit:
+                    target_alias = hit[0]
+                else:
+                    target_alias = f"u{tuid}"
+            if target_alias:
+                reply_part = f" (→{reply_to}|{target_alias})"
+            else:
+                reply_part = f" (→{reply_to})"
 
         raw_text = msg.get("text") or ""
         if self.bot_config.PII_SCRUB:
@@ -222,3 +320,24 @@ class ContextAssembler:
 
         escaped_text = escape_xml(raw_text)
         return f"[{msg_id}|{alias}|{escape_xml(nick)}]{reply_part}: {escaped_text}"
+
+    def _format_current_line(
+        self,
+        current_msg: dict[str, Any],
+        reply_target: Optional[dict[str, Any]],
+        alias_map: Optional[dict[Any, tuple[str, str]]] = None,
+    ) -> str:
+        """Текущее сообщение + вторая строка с явной целью: чей реплай и текст цели."""
+        base = self._format_message_line(current_msg, alias_map)
+        if not reply_target:
+            return base
+        tid = reply_target.get("message_id")
+        talias = reply_target.get("alias") or "u0"
+        tnick = sanitize_nick(reply_target.get("nick", "User"), max_len=32)
+        ttext = reply_target.get("text") or ""
+        if self.bot_config.PII_SCRUB:
+            ttext = scrub_pii(ttext)
+        ttext = escape_xml(_truncate_text(ttext, 200))
+        if ttext:
+            return base + f"\n[ответ на #{tid} от {talias} «{escape_xml(tnick)}»: {ttext}]"
+        return base + f"\n[ответ на #{tid} от {talias} «{escape_xml(tnick)}»]"

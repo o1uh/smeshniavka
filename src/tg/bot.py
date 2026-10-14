@@ -28,8 +28,10 @@ from src.persona.sanitizer import (
 )
 from src.gateway.schemas import PersonaTextReply
 from src.dossier.worker import DossierWorker
-from src.media.analyzer import MediaAnalyzer
+from src.media.analyzer import MediaAnalyzer, contains_forbidden_score, SCORE_PATTERN, build_step2_media_json
 from src.research.search import ResearchModule
+from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA
+from src.antijob.detector import ProvocationDetector
 from src.tg.stubs import (
     format_sticker_stub,
     format_animation_stub,
@@ -218,6 +220,14 @@ class FunnyBotApp:
         self.start_time = time.time()
         self.muted_until: float = 0.0
 
+        # Три воркера: chat — дефолтное общение, track — треки, media — остальное.
+        qmax = int(getattr(self.bot_cfg, "WORKER_QUEUE_MAX", 30) or 30)
+        self.lanes = LanePool(
+            chat=LaneWorker(LANE_CHAT, max_queue=qmax),
+            track=LaneWorker(LANE_TRACK, max_queue=qmax),
+            media=LaneWorker(LANE_MEDIA, max_queue=qmax),
+        )
+
         self._setup_handlers()
 
     def _setup_handlers(self) -> None:
@@ -231,7 +241,29 @@ class FunnyBotApp:
         self.bot_username = me.username or "funny_bot"
         self.ping_detector = PingDetector(self.bot_username, self.bot_id, self.bot_cfg)
         self.send_queue.start()
-        logger.info("Bot initialized: @%s (id=%d)", self.bot_username, self.bot_id)
+        self.lanes.start_all()
+        logger.info("Bot initialized: @%s (id=%d) lanes=%s", self.bot_username, self.bot_id, self.lanes.sizes())
+
+    async def shutdown(self) -> None:
+        await self.lanes.stop_all()
+        await self.send_queue.stop()
+
+    def _lane_session(self, chat_id: int, lane: str) -> str:
+        """Отдельная тёплая сессия моста на лейн: 3 воркера не вытесняют друг друга."""
+        return f"tg_{chat_id}:{lane}"
+
+    async def _typing_keepalive(self, chat_id: int, stop_event: asyncio.Event) -> None:
+        """Человеческое «печатает…» на всё время долгой генерации, а не один раз."""
+        interval = float(getattr(self.bot_cfg, "TYPING_KEEPALIVE_S", 4.0) or 4.0)
+        while not stop_event.is_set():
+            try:
+                await self.sender.send_chat_action(chat_id, "typing")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                continue
 
     async def handle_edited_message(self, message: types.Message) -> None:
         """TB-03: edit обновляет текст в БД, без ответов и без P1."""
@@ -406,22 +438,49 @@ class FunnyBotApp:
                     )
                 return
 
-            await self._process_ping(message, msg_dict, media_kind, file_id, file_unique_id)
+            # Роутинг на 3 воркера по типу вложения (с учётом реплая), ingress не ждёт.
+            # Быстрый sync-пик: если реплай на медиа — это media/track лейн, иначе chat.
+            route_kind = media_kind
+            if not route_kind and message.reply_to_message:
+                try:
+                    route_kind = extract_media_info(message.reply_to_message).media_kind
+                except Exception:
+                    route_kind = None
+            lane = route_lane(route_kind)
+            job = LaneJob(
+                lane=lane,
+                label=f"ping#{message.message_id}:{lane}",
+                coro_factory=lambda m=message, md=dict(msg_dict), mk=media_kind, fi=file_id, fu=file_unique_id, ln=lane, uid=user_id: self._process_ping(m, md, mk, fi, fu, lane=ln),
+                enqueued_at=time.time(),
+            )
+            await self.lanes.get(lane).submit(job)
             self.ping_detector.record_bot_reply(user_id)
             self.proactive.on_ping_reply_sent()
         else:
             self.ping_detector.record_other_message()
-            # 9. Check Proactive if not muted
+            # 9. Check Proactive if not muted — тоже в chat-воркер, не в ingress
             now = time.time()
             if now > self.muted_until:
                 should_eval = self.proactive.record_incoming_message(user_id)
                 if should_eval:
                     can_trigger, reject_reason = self.proactive.check_proactive_caps()
                     if can_trigger:
-                        await self._process_proactive(message, msg_dict)
+                        job = LaneJob(
+                            lane=LANE_CHAT,
+                            label=f"proactive#{message.message_id}",
+                            coro_factory=lambda m=message, md=dict(msg_dict): self._process_proactive(m, md),
+                            enqueued_at=time.time(),
+                        )
+                        await self.lanes.get(LANE_CHAT).submit(job)
 
-        # 10. Check dossier extraction window (every 40 messages)
-        await self.dossier_worker.process_window(chat.id, message.message_id)
+        # 10. Досье — строго фоном, горячий путь не ждёт (иначе каждый пинг +P2 вызов)
+        async def _dossier_bg(chat_id: int = chat.id, mid: int = message.message_id):
+            try:
+                await self.dossier_worker.process_window(chat_id, mid)
+            except Exception as e:
+                logger.warning("Background dossier failed: %s", e)
+
+        asyncio.create_task(_dossier_bg())
 
     async def _handle_commands(self, message: types.Message, msg_dict: dict[str, Any]) -> bool:
         text = (msg_dict.get("text") or "").strip()
@@ -444,11 +503,23 @@ class FunnyBotApp:
             return True
 
         elif text.startswith("/reset"):
-            ok = await self.gateway.reset_session(f"tg_{message.chat.id}")
-            if ok:
-                await message.reply("Сессия контекста диалога на мосту Antigravity сброшена.")
+            ok_any = False
+            for lane in (LANE_CHAT, LANE_TRACK, LANE_MEDIA):
+                try:
+                    if await self.gateway.reset_session(self._lane_session(message.chat.id, lane)):
+                        ok_any = True
+                except Exception:
+                    pass
+            # Совместимость со старой сессией без суффикса лейна
+            try:
+                if await self.gateway.reset_session(f"tg_{message.chat.id}"):
+                    ok_any = True
+            except Exception:
+                pass
+            if ok_any:
+                await message.reply("Сессии контекста диалога на мосту Antigravity сброшены (chat/track/media).")
             else:
-                await message.reply("Сессия не найдена или уже была очищена.")
+                await message.reply("Сессии не найдены или уже были очищены.")
             return True
 
         elif text.startswith("/me"):
@@ -545,6 +616,7 @@ class FunnyBotApp:
             mode="who",
             request_attrs=f'target="{target_alias}"',
         )
+        session_id = self._lane_session(chat_id, LANE_CHAT)
         res = await self.gateway.generate(
             prompt_name="persona_who",
             contents=contents,
@@ -552,7 +624,8 @@ class FunnyBotApp:
             priority="P0",
             response_schema=PersonaTextReply,
             estimated_tokens=400,
-            session_id=f"tg_{chat_id}",
+            session_id=session_id,
+            lane=LANE_CHAT,
         )
         candidate = res.reply.strip() if isinstance(res, PersonaTextReply) else (
             res.strip() if isinstance(res, str) and res.strip() else ""
@@ -567,7 +640,8 @@ class FunnyBotApp:
                 priority="P0",
                 response_schema=PersonaTextReply,
                 estimated_tokens=400,
-                session_id=f"tg_{chat_id}",
+                session_id=session_id,
+                lane=LANE_CHAT,
             )
             candidate2 = res2.reply.strip() if isinstance(res2, PersonaTextReply) else (
                 res2.strip() if isinstance(res2, str) and res2.strip() else ""
@@ -615,7 +689,8 @@ class FunnyBotApp:
                     kind=media_kind,
                     file_unique_id=file_unique_id,
                     caption=caption,
-                    priority="P2"
+                    priority="P2",
+                    lane=("track" if media_kind == "audio" else "media"),
                 )
                 logger.info("Background P2 analyzed and cached media %s (%s)", file_unique_id, media_kind)
         except Exception as e:
@@ -629,11 +704,37 @@ class FunnyBotApp:
         msg_dict: dict[str, Any],
         media_kind: Optional[str],
         file_id: Optional[str],
-        file_unique_id: Optional[str]
+        file_unique_id: Optional[str],
+        lane: str = LANE_CHAT,
+    ) -> None:
+        """Воркер-обработчик пинга. Живой флоу: typing всё время + контекст, а не дефолт-оценка."""
+        chat_id = message.chat.id
+        media_cache_item = None
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(self._typing_keepalive(chat_id, stop_typing))
+        try:
+            return await self._process_ping_inner(
+                message, msg_dict, media_kind, file_id, file_unique_id, lane
+            )
+        finally:
+            stop_typing.set()
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _process_ping_inner(
+        self,
+        message: types.Message,
+        msg_dict: dict[str, Any],
+        media_kind: Optional[str],
+        file_id: Optional[str],
+        file_unique_id: Optional[str],
+        lane: str = LANE_CHAT,
     ) -> None:
         chat_id = message.chat.id
         media_cache_item = None
-        asyncio.create_task(self.sender.send_chat_action(chat_id, "typing"))
 
         # 1. Resolve media: check current message, and if absent, check reply_to_message!
         target_kind = media_kind
@@ -649,63 +750,179 @@ class FunnyBotApp:
                 target_file_unique_id = reply_media.file_unique_id
                 target_caption = reply_media.caption
 
-        # 2. Analyze media if present
-        if target_file_unique_id:
-            media_cache_item = await self.db.get_media_cache(target_file_unique_id)
-            if not media_cache_item and target_file_id and target_kind:
-                download_path = Path(f"/tmp/smesh-{target_file_unique_id}")
+        # 1b. Чей реплай: снапшот цели из апдейта (покрывает via_bot и старое).
+        # Стабильные alias/ник доберём из БД в gather, текст — из апдейта как fallback.
+        reply_snapshot: Optional[dict[str, Any]] = None
+        reply_to_id = msg_dict.get("reply_to")
+        if reply_to_id and message.reply_to_message:
+            rmsg = message.reply_to_message
+            ruser = getattr(rmsg, "from_user", None)
+            ruid = getattr(ruser, "id", None) if ruser else None
+            if ruid is None:
+                ruid = msg_dict.get("reply_to_user_id")
+            rnick = sanitize_nick(
+                getattr(ruser, "full_name", None) or getattr(getattr(rmsg, "sender_chat", None), "title", None) or "Unknown",
+                max_len=32,
+            )
+            rtext = (getattr(rmsg, "text", None) or getattr(rmsg, "caption", None) or "")
+            if not rtext:
                 try:
-                    tg_file = await self.bot.get_file(target_file_id)
-                    if tg_file.file_path:
-                        await self.bot.download_file(tg_file.file_path, destination=download_path)
-                        media_cache_item = await self.media_analyzer.analyze_media_step1(
-                            file_path=download_path,
-                            kind=target_kind,
-                            file_unique_id=target_file_unique_id,
-                            caption=target_caption,
-                            priority="P0"
-                        )
-                except Exception as e:
-                    logger.error("Error downloading/analyzing media for ping: %s", e)
-                finally:
-                    download_path.unlink(missing_ok=True)
+                    rtext = extract_media_info(rmsg).text_stub or ""
+                except Exception:
+                    rtext = ""
+            reply_snapshot = {
+                "message_id": reply_to_id,
+                "user_id": ruid,
+                "alias": f"u{ruid}" if ruid is not None else "u0",
+                "nick": rnick,
+                "text": rtext,
+            }
+        # Уточняем лейн по реальной цели (пинг мог быть текстом, а цель — трек/мем)
+        if target_kind == "audio":
+            lane = LANE_TRACK
+        elif target_kind:
+            lane = LANE_MEDIA if lane == LANE_CHAT and target_kind != "audio" else lane
+        session_id = self._lane_session(chat_id, lane)
+        media_lane = "track" if (target_kind == "audio") else ("media" if target_kind else lane)
 
-        # 3. Check Research (force triggers, soft triggers, or media that may require context)
+        # 2. Медиа и история — параллельно: пока качается файл, уже читаем контекст
         text = (msg_dict.get("text") or "").strip()
+        show_links = self.research.should_show_links(text)
+        # Провокация в адрес бота: реплай ему + оскорбление/подначивание/разводка.
+        # Обычные подъёбы между участниками — не провокация, там дефолт-режим.
+        t_low = text.lower()
+        _is_reply_to_bot = bool(msg_dict.get("reply_to_user_id") == self.bot_id and self.bot_id)
+        _mentions = (f"@{self.bot_username}".lower() in t_low) if getattr(self, "bot_username", "") else False
+        if not _mentions:
+            for _a in (self.bot_cfg.BOT_ALIASES or []):
+                if _a and _a.lower() in t_low:
+                    _mentions = True
+                    break
+        provoked = ProvocationDetector.is_provoked(
+            text, is_reply_to_bot=_is_reply_to_bot, mentions_bot=_mentions
+        )
+        want_decide = (
+            self.research.should_force_search(text)
+            or self.research.should_soft_search(text)
+            or bool(target_file_unique_id)
+        )
+
+        async def _load_media():
+            if not target_file_unique_id:
+                return None
+            cached = await self.db.get_media_cache(target_file_unique_id)
+            if cached:
+                return cached
+            if not (target_file_id and target_kind):
+                return None
+            download_path = Path(f"/tmp/smesh-{target_file_unique_id}")
+            try:
+                tg_file = await self.bot.get_file(target_file_id)
+                if tg_file.file_path:
+                    await self.bot.download_file(tg_file.file_path, destination=download_path)
+                    return await self.media_analyzer.analyze_media_step1(
+                        file_path=download_path,
+                        kind=target_kind,
+                        file_unique_id=target_file_unique_id,
+                        caption=target_caption,
+                        priority="P0",
+                        lane=media_lane,
+                    )
+            except Exception as e:
+                logger.error("Error downloading/analyzing media for ping: %s", e)
+                return None
+            finally:
+                try:
+                    download_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return None
+
+        async def _load_hint():
+            if not want_decide:
+                return []
+            try:
+                return await self.db.get_last_messages(chat_id, limit=10)
+            except Exception:
+                return []
+
+        async def _load_reply_row():
+            if not reply_to_id:
+                return None
+            try:
+                return await self.db.get_message(chat_id, reply_to_id)
+            except Exception:
+                return None
+
+        media_cache_item, hint_msgs, reply_row = await asyncio.gather(
+            _load_media(), _load_hint(), _load_reply_row()
+        )
+
+        # 2b. Финальный снапшот цели: стабильные alias/ник из БД, текст из БД/апдейта.
+        # Случай из чата: трек скинул другой чел, а ты реплаем попросил оценку —
+        # модель должна видеть, что трек НЕ твой.
+        if reply_to_id:
+            tuid = None
+            talias = None
+            tnick = None
+            ttext = ""
+            if reply_row:
+                tuid = reply_row.get("user_id")
+                talias = reply_row.get("alias") or (f"u{tuid}" if tuid is not None else None)
+                tnick = reply_row.get("nick") or None
+                ttext = reply_row.get("text") or ""
+            if reply_snapshot:
+                tuid = tuid if tuid is not None else reply_snapshot.get("user_id")
+                talias = talias or reply_snapshot.get("alias")
+                tnick = tnick or reply_snapshot.get("nick")
+                if not ttext:
+                    ttext = reply_snapshot.get("text") or ""
+            if tuid is None:
+                tuid = msg_dict.get("reply_to_user_id")
+            reply_snapshot = {
+                "message_id": reply_to_id,
+                "user_id": tuid,
+                "alias": talias or (f"u{tuid}" if tuid is not None else "u0"),
+                "nick": sanitize_nick(tnick or "Unknown", max_len=32),
+                "text": ttext or "",
+            }
+
+        # 3. Research: быстрый гейт в коде + LLM только формулирует query
         need_search = False
         safe_query = None
         sources_text = None
-        show_links = self.research.should_show_links(text)
 
         media_ctx = None
         if media_cache_item:
             m_sum = media_cache_item.get("summary") or ""
             m_ocr = media_cache_item.get("ocr_text") or ""
+            m_cap = target_caption or ""
             parts = []
             if m_sum:
                 parts.append(f"Медиа: {m_sum[:250]}")
             if m_ocr:
                 parts.append(f"Текст на картинке: {m_ocr[:250]}")
+            if m_cap:
+                parts.append(f"Подпись: {m_cap[:150]}")
             if parts:
                 media_ctx = f"[{' | '.join(parts)}]"
 
-        if self.research.should_force_search(text) or self.research.should_soft_search(text) or bool(media_cache_item):
-            last_msgs = await self.db.get_last_messages(chat_id, limit=10)
-            history_lines = [f"{m.get('nick', 'User')}: {m.get('text', '')}" for m in last_msgs if m.get("text")]
+        if want_decide:
+            history_lines = [f"{m.get('nick', 'User')}: {m.get('text', '')}" for m in hint_msgs if m.get("text")]
             history_str = "\n".join(history_lines)
-            known_nicks = [m.get("nick") for m in last_msgs if m.get("nick")]
+            known_nicks = [m.get("nick") for m in hint_msgs if m.get("nick")]
 
             need_search, safe_query = await self.research.decide_search(
                 history_text=history_str,
                 current_text=text,
                 known_nicks=known_nicks,
-                extra_context=media_ctx
+                extra_context=media_ctx,
             )
 
         # Do NOT inject fake sources_text. The model autonomously runs search_web with search_query.
-        sources_text = None
 
-        # 4. Mode determination
+        # 4. Mode: медиа всегда через media_reply (там контекст + запрет N/100),
+        # поиск — флагом enable_search, а не отдельным режимом без разбора вложения
         if media_cache_item:
             mode = "media_reply"
         elif need_search:
@@ -713,32 +930,45 @@ class FunnyBotApp:
         else:
             mode = "ping"
 
-        # 5. Assemble context
+        # 5. Assemble context — полный (history+досье+тред), а не только разбор.
+        # Ответ от контекста: кто кинул, что обсуждали, какое досье у автора.
+        # Вложение принадлежит sent_by, просит ответить requested_by — не путать!
         step2_media_json = None
+        media_kind_for_guard = None
+        requester_alias = msg_dict.get("alias") or f"u{msg_dict.get('user_id', 0)}"
+        requester_nick = msg_dict.get("nick") or "User"
         if media_cache_item:
-            summary_val = media_cache_item.get("summary") or ""
-            is_audio = (media_cache_item.get("kind") == "audio")
-            step2_data = {
-                "kind": media_cache_item.get("kind"),
-                "summary": summary_val[:300],  # Include summary per TB-15
-                "ocr_text": media_cache_item.get("ocr_text")[:300] if media_cache_item.get("ocr_text") else None,
-                "verdict": media_cache_item.get("verdict"),
-                "score100": media_cache_item.get("score100") if is_audio else None,
-                "score_reason": media_cache_item.get("score_reason") if is_audio else None,
-                "track_meta": media_cache_item.get("track_meta"),
-                "tags": media_cache_item.get("tags"),
-                "unintelligible": media_cache_item.get("unintelligible"),
-                "injection_suspected": media_cache_item.get("injection_suspected"),
-            }
-            step2_media_json = json.dumps(step2_data, ensure_ascii=False)
+            media_kind_for_guard = media_cache_item.get("kind")
+            # Вложение из реплая — автор цели; своё вложение — автор запроса.
+            media_from_reply = bool(reply_snapshot) and not media_kind
+            if media_from_reply and reply_snapshot:
+                sent_alias, sent_nick = reply_snapshot.get("alias"), reply_snapshot.get("nick")
+            else:
+                sent_alias, sent_nick = requester_alias, requester_nick
+            step2_media_json = build_step2_media_json(
+                media_cache_item,
+                sent_by_alias=sent_alias,
+                sent_by_nick=sent_nick,
+                requested_by_alias=requester_alias,
+                requested_by_nick=requester_nick,
+            )
+
+        # Обогащённый current: явная цель реплая для <current> (см. assembler).
+        current_enriched = dict(msg_dict)
+        if reply_snapshot:
+            current_enriched["reply_target"] = reply_snapshot
 
         request_attrs = f'mode="{mode}"'
         if mode == "research":
             request_attrs += f' show_links="{"true" if show_links else "false"}"'
+        if reply_snapshot and reply_snapshot.get("alias"):
+            request_attrs += f' reply_target="{reply_snapshot.get("alias")}"'
+        # Явный флаг для промпта: провокация в адрес бота → режим жёсткого отпора
+        request_attrs += f' provoked="{"true" if provoked else "false"}"'
 
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
-            current_msg=msg_dict,
+            current_msg=current_enriched,
             mode=mode,
             media_json=step2_media_json,
             sources_text=sources_text,
@@ -747,8 +977,11 @@ class FunnyBotApp:
 
         reply_raw = None
         is_media_mode = (mode == "media_reply")
+        # При провокации второй провал гарда не должен давать вялую отмазку —
+        # лучше первый валидный (пусть длинноватый) кандидат, чем «башка не варит»
+        provoked_fallback: Optional[str] = None
 
-        # Outgoing guard: if leak or bad parse is detected, drop + 1 repair-retry, do not send raw
+        # Outgoing guard: leak/bad parse/forbidden N/100 на фото → 1 repair, сырое не шлём
         for attempt in range(2):
             res = await self.gateway.generate(
                 prompt_name=f"persona_{mode}",
@@ -757,9 +990,10 @@ class FunnyBotApp:
                 priority="P0",
                 response_schema=PersonaTextReply,
                 estimated_tokens=700,
-                enable_search=True,  # Always empower autonomous web search on pings & media replies
+                enable_search=bool(need_search),
                 search_query=safe_query if need_search else None,
-                session_id=f"tg_{chat_id}"
+                session_id=session_id,
+                lane=lane,
             )
 
             if isinstance(res, dict) and (res.get("is_degraded") or res.get("is_blocked")):
@@ -790,9 +1024,31 @@ class FunnyBotApp:
                 else:
                     reply_raw = None
                     break
-            else:
-                reply_raw = candidate_text
-                break
+            # Запрет N/100 на любом не-аудио — тоже повод на repair, а не молча резать
+            if is_media_mode and contains_forbidden_score(candidate_text, media_kind_for_guard):
+                logger.warning(
+                    "Outgoing guard: forbidden N/100 score on %s reply, repair attempt %d/2",
+                    media_kind_for_guard, attempt + 1,
+                )
+                if attempt == 0:
+                    continue
+                candidate_text = SCORE_PATTERN.sub("", candidate_text).strip()
+            # Провокация: отпор обязан быть коротким и рубленым — длинноту в repair
+            if provoked and not is_media_mode and not ProvocationDetector.provoked_reply_ok(candidate_text):
+                logger.warning(
+                    "Outgoing guard: provoked reply too soft/long on attempt %d/2 (text: %.80s)",
+                    attempt + 1, candidate_text,
+                )
+                if provoked_fallback is None:
+                    provoked_fallback = candidate_text
+                if attempt == 0:
+                    continue
+                candidate_text = provoked_fallback
+            reply_raw = candidate_text
+            break
+
+        if not reply_raw and provoked_fallback:
+            reply_raw = provoked_fallback
 
         if not reply_raw:
             # Fallback to static degraded excuse instead of sending raw/broken text
@@ -826,7 +1082,6 @@ class FunnyBotApp:
             if media_cache_item and media_cache_item.get("kind") == "audio":
                 reply_raw = self.media_analyzer.verify_and_patch_reply_score(reply_raw, media_cache_item)
             else:
-                from src.media.analyzer import SCORE_PATTERN
                 reply_raw = SCORE_PATTERN.sub("", reply_raw).strip()
 
         final_text = await self._resolve_aliases_to_text(chat_id, str(reply_raw))
@@ -867,7 +1122,9 @@ class FunnyBotApp:
             system_instruction=system_instruction,
             priority="P1",
             response_schema=ProactiveDecision,
-            estimated_tokens=300
+            estimated_tokens=300,
+            session_id=self._lane_session(chat_id, LANE_CHAT),
+            lane=LANE_CHAT,
         )
 
         if not decision:

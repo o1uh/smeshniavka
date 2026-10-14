@@ -172,7 +172,10 @@ async def async_main():
     logger.info("Stopping services...")
     heartbeat_task.cancel()
     backup_task.cancel()
-    await app.send_queue.stop()
+    try:
+        await app.shutdown()
+    except Exception:
+        await app.send_queue.stop()
     await app.bot.session.close()
     await db_mgr.close()
 

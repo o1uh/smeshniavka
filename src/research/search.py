@@ -150,7 +150,8 @@ class ResearchModule:
             system_instruction=system_instruction,
             priority="P0",
             response_schema=ResearchDecision,
-            estimated_tokens=200
+            estimated_tokens=200,
+            lane="chat",
         )
 
         need_search = (dec_result.need_search if dec_result else False) or forced

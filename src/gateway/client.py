@@ -171,10 +171,14 @@ class AntigravityGateway(Gateway):
         self._active_url: Optional[str] = None
         self._url_lock = asyncio.Lock()
 
-        # Concurrency & priorities
+        # Concurrency & priorities (global + per-lane so media can't eat chat)
         self.max_concurrent = self.bot_config.MAX_CONCURRENT
+        self.chat_max = getattr(self.bot_config, "CHAT_MAX_CONCURRENT", 2)
+        self.track_max = getattr(self.bot_config, "TRACK_MAX_CONCURRENT", 1)
+        self.media_max = getattr(self.bot_config, "MEDIA_MAX_CONCURRENT", 1)
         self._current_total = 0
         self._current_p2 = 0
+        self._lane_counts: dict[str, int] = {"chat": 0, "track": 0, "media": 0}
         self._lock = asyncio.Lock()
 
         # Monitoring & status metrics
@@ -272,28 +276,66 @@ class AntigravityGateway(Gateway):
             logger.warning("Failed to reset session %s on bridge: %s", session_id, e)
             return False
 
-    async def _acquire_slot(self, priority: str) -> bool:
+    @staticmethod
+    def lane_for_prompt(prompt_name: str, lane: Optional[str] = None) -> str:
+        """Маппинг промпта на воркер-лейн. Явный lane всегда побеждает."""
+        if lane in ("chat", "track", "media"):
+            return lane
+        if prompt_name in ("persona_media_reply", "media_analyze"):
+            # без явного lane не угадаешь трек vs остальное — по дефолту media,
+            # трек-коллеры передают lane="track" явно
+            return "media"
+        if prompt_name in ("dossier_extract", "dossier_consolidate", "summary_chunk", "summary_merge"):
+            return "media"
+        return "chat"
+
+    def _lane_limit(self, lane: str) -> int:
+        if lane == "track":
+            return self.track_max
+        if lane == "media":
+            return self.media_max
+        return self.chat_max
+
+    def _lane_timeout(self, lane: str) -> float:
+        if lane == "track":
+            return float(getattr(self.bot_config, "TRACK_TIMEOUT_S", 50.0))
+        if lane == "media":
+            return float(getattr(self.bot_config, "MEDIA_TIMEOUT_S", 75.0))
+        return float(getattr(self.bot_config, "CHAT_TIMEOUT_S", 35.0))
+
+    async def _acquire_slot(self, priority: str, lane: str = "chat") -> bool:
+        if lane not in self._lane_counts:
+            lane = "chat"
+        lane_limit = self._lane_limit(lane)
         while True:
             async with self._lock:
                 available_slots = self.max_concurrent - self._current_total
-                if priority == "P0":
+                lane_used = self._lane_counts.get(lane, 0)
+                if lane_used >= lane_limit:
+                    pass
+                elif priority == "P0":
                     if available_slots > 0:
                         self._current_total += 1
+                        self._lane_counts[lane] = lane_used + 1
                         return True
                 elif priority == "P1":
                     if available_slots > 1:
                         self._current_total += 1
+                        self._lane_counts[lane] = lane_used + 1
                         return True
                 elif priority == "P2":
                     if available_slots > 1 and self._current_p2 < 1:
                         self._current_total += 1
                         self._current_p2 += 1
+                        self._lane_counts[lane] = lane_used + 1
                         return True
             await asyncio.sleep(0.05)
 
-    async def _release_slot(self, priority: str) -> None:
+    async def _release_slot(self, priority: str, lane: str = "chat") -> None:
         async with self._lock:
             self._current_total = max(0, self._current_total - 1)
+            if lane in self._lane_counts:
+                self._lane_counts[lane] = max(0, self._lane_counts[lane] - 1)
             if priority == "P2":
                 self._current_p2 = max(0, self._current_p2 - 1)
 
@@ -307,12 +349,16 @@ class AntigravityGateway(Gateway):
         estimated_tokens: int = 1000,
         enable_search: bool = False,
         search_query: Optional[str] = None,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        lane: Optional[str] = None,
     ) -> Any:
         """
         Executes generation via Antigravity Fast Bridge.
+        lane: chat|track|media — явный воркер. Если не задан, выводится из prompt_name.
         """
-        await self._acquire_slot(priority)
+        resolved_lane = self.lane_for_prompt(prompt_name, lane)
+        timeout = self._lane_timeout(resolved_lane)
+        await self._acquire_slot(priority, resolved_lane)
         try:
             return await asyncio.wait_for(
                 self._execute(
@@ -326,16 +372,16 @@ class AntigravityGateway(Gateway):
                     search_query=search_query,
                     session_id=session_id
                 ),
-                timeout=75.0
+                timeout=timeout
             )
         except asyncio.TimeoutError:
-            logger.error("Bridge call '%s' timed out after 75s", prompt_name)
+            logger.error("Bridge call '%s' timed out after %ss (lane=%s)", prompt_name, timeout, resolved_lane)
             self._mark_failure("TIMEOUT")
             if priority == "P0":
                 return {"is_degraded": True}
             return None
         finally:
-            await self._release_slot(priority)
+            await self._release_slot(priority, resolved_lane)
 
     def _mark_failure(self, error_desc: str) -> None:
         self.is_healthy = False
@@ -374,7 +420,7 @@ class AntigravityGateway(Gateway):
                 f"\n[ОБЯЗАТЕЛЬНО вызови инструмент search_web с запросом: \"{search_query}\". "
                 "Изучи реальные факты/новости/события из результатов поиска и используй их в ответе в чат!]"
             )
-        elif enable_search or prompt_name in ("persona_research", "persona_ping", "persona_media_reply"):
+        elif enable_search:
             search_directive = (
                 "\n[Инструкция по веб-поиску: тебе доступен инструмент search_web. "
                 "Сам думай, когда нужен поиск: если в вопросе, реплике или меме есть непонятные отсылки, "
@@ -392,14 +438,16 @@ class AntigravityGateway(Gateway):
             if not found_system:
                 messages.insert(0, {"role": "system", "content": search_directive.strip()})
 
-            # Also append to the last user message for maximum attention in CLI sessions
-            for m in reversed(messages):
-                if m.get("role") == "user":
-                    if isinstance(m.get("content"), str):
-                        m["content"] = m["content"] + f"\n\n{search_directive}"
-                    elif isinstance(m.get("content"), list):
-                        m["content"].append({"type": "text", "text": f"\n\n{search_directive}"})
-                    break
+            # Дублировать в user-блок — только обязательный запрос с query:
+            # иначе жрём токены и внимание на каждом пинге.
+            if search_query:
+                for m in reversed(messages):
+                    if m.get("role") == "user":
+                        if isinstance(m.get("content"), str):
+                            m["content"] = m["content"] + f"\n\n{search_directive}"
+                        elif isinstance(m.get("content"), list):
+                            m["content"].append({"type": "text", "text": f"\n\n{search_directive}"})
+                        break
 
         target_model = self._resolve_model(self.bot_config.MODEL_ID)
 

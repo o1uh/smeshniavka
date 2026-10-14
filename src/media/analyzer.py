@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -19,6 +20,52 @@ from src.context.prompts import PromptBuilder
 SCORE_PATTERN = re.compile(r"\b(\d{1,3})/100\b")
 
 
+def contains_forbidden_score(reply_text: str, kind: Optional[str]) -> bool:
+    """True, если в ответе есть N/100, а kind — не audio (фото/мем/видео/войс)."""
+    if kind == "audio":
+        return False
+    return bool(SCORE_PATTERN.search(reply_text or ""))
+
+
+def describe_person(alias: Optional[str], nick: Optional[str]) -> str:
+    """Короткое человекочитаемое «u7 «Петя»» для JSON и логов."""
+    a = (alias or "").strip() or "u0"
+    n = (nick or "").strip() or "Unknown"
+    return f"{a} «{n}»"
+
+
+def build_step2_media_json(
+    media_cache_item: dict[str, Any],
+    sent_by_alias: Optional[str] = None,
+    sent_by_nick: Optional[str] = None,
+    requested_by_alias: Optional[str] = None,
+    requested_by_nick: Optional[str] = None,
+) -> str:
+    """Урезанный JSON разбора для <media> + КТО прислал вложение и КТО просит ответить.
+
+    Различает автора вложения (sent_by) и автора запроса (requested_by):
+    другой чел скинул трек, а ты реплаем попросил оценку — трек не твой.
+    """
+    summary_val = media_cache_item.get("summary") or ""
+    kind = media_cache_item.get("kind")
+    is_audio = (kind == "audio")
+    data = {
+        "kind": kind,
+        "summary": summary_val[:300],
+        "ocr_text": media_cache_item.get("ocr_text")[:300] if media_cache_item.get("ocr_text") else None,
+        "verdict": media_cache_item.get("verdict"),
+        "score100": media_cache_item.get("score100") if is_audio else None,
+        "score_reason": media_cache_item.get("score_reason") if is_audio else None,
+        "track_meta": media_cache_item.get("track_meta"),
+        "tags": media_cache_item.get("tags"),
+        "unintelligible": media_cache_item.get("unintelligible"),
+        "injection_suspected": media_cache_item.get("injection_suspected"),
+        "sent_by": describe_person(sent_by_alias, sent_by_nick),
+        "requested_by": describe_person(requested_by_alias, requested_by_nick),
+    }
+    return json.dumps(data, ensure_ascii=False)
+
+
 class MediaAnalyzer:
     """Manages media normalization with ffmpeg, inline base64 calls to Gemini, caching, and score verification."""
 
@@ -35,6 +82,8 @@ class MediaAnalyzer:
         self.gateway = gateway
         self.prompts = prompt_builder
         self.tmp_dir = Path(tmp_dir)
+        # Дедуп параллельных разборов одного file_unique_id (спам одной гифкой)
+        self._inflight: dict[str, asyncio.Task] = {}
 
     def _cleanup_old_tmp_files(self, max_age_hours: int = 1) -> None:
         """Sweeps temp files older than max_age_hours."""
@@ -46,12 +95,58 @@ class MediaAnalyzer:
         except Exception as e:
             logger.warning("Error cleaning temp files: %s", e)
 
+    def _photo_downscale(self, input_path: Path) -> Path:
+        """Ужимает фото до PHOTO_MAX_DIM по длинной стороне (PIL, иначе ffmpeg)."""
+        max_dim = int(getattr(self.config, "PHOTO_MAX_DIM", 1280) or 1280)
+        quality = int(getattr(self.config, "PHOTO_JPEG_Q", 72) or 72)
+        out_path = self.tmp_dir / f"smesh-{input_path.stem}.photo.jpg"
+        # 1. Пробуем PIL — быстро и без форка ffmpeg
+        try:
+            from PIL import Image  # type: ignore
+
+            def _do_pil() -> Optional[Path]:
+                try:
+                    with Image.open(input_path) as im:
+                        im = im.convert("RGB")
+                        w, h = im.size
+                        scale = min(1.0, max_dim / max(w, h))
+                        if scale < 1.0:
+                            im = im.resize((int(w * scale), int(h * scale)))
+                        im.save(out_path, "JPEG", quality=quality, optimize=True)
+                    return out_path if out_path.exists() else None
+                except Exception as e:
+                    logger.warning("PIL photo downscale failed: %s", e)
+                    return None
+
+            # вызывающий код уже в to_thread, тут можно синхронно
+            res = _do_pil()
+            if res:
+                return res
+        except ImportError:
+            pass
+        # 2. Fallback: ffmpeg scale
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-i", str(input_path),
+                "-vf", f"scale='min(iw,{max_dim})':'min(ih,{max_dim})':eval=frame",
+                "-q:v", "4",
+                str(out_path),
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=25)
+            if out_path.exists():
+                return out_path
+        except Exception as e:
+            logger.warning("ffmpeg photo downscale failed, using original: %s", e)
+        return input_path
+
     def convert_media_if_needed(self, input_path: Path, kind: str) -> Path:
         """
-        Converts/compresses media with ffmpeg:
-        - audio/voice -> mp3
-        - video/video_note -> mp4 (first 60s)
-        - compress <= 10MB if file is large
+        Конвертация/ужимка (синхронная, вызывать через to_thread):
+        - audio/voice -> mp3 mono 64k
+        - video/video_note -> mp4 первые VIDEO_MAX_S сек, 480p, veryfast (было 60с/fast)
+        - animation (гифка) -> mp4 первые ANIM_MAX_S сек, 480p, без аудио (главный фикс ступора)
+        - sticker -> jpg первый кадр
+        - photo -> downscale до PHOTO_MAX_DIM (было: оригинал 5МБ в base64)
         """
         self._cleanup_old_tmp_files()
         out_path = self.tmp_dir / f"smesh-{input_path.stem}.converted"
@@ -63,25 +158,41 @@ class MediaAnalyzer:
                 "-ac", "1", "-b:a", "64k",
                 str(out_path)
             ]
-        elif kind in ("video", "video_note", "animation"):
+        elif kind in ("video", "video_note"):
+            max_s = int(getattr(self.config, "VIDEO_MAX_S", 20) or 20)
+            height = int(getattr(self.config, "VIDEO_HEIGHT", 480) or 480)
             out_path = out_path.with_suffix(".mp4")
             cmd = [
-                "ffmpeg", "-y", "-t", "60", "-i", str(input_path),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "28",
-                "-c:a", "aac", "-b:a", "64k",
+                "ffmpeg", "-y", "-t", str(max_s), "-i", str(input_path),
+                "-vf", f"scale=-1:{height}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+                "-c:a", "aac", "-b:a", "48k",
+                str(out_path)
+            ]
+        elif kind == "animation":
+            max_s = int(getattr(self.config, "ANIM_MAX_S", 4) or 4)
+            height = int(getattr(self.config, "ANIM_HEIGHT", 480) or 480)
+            out_path = out_path.with_suffix(".mp4")
+            cmd = [
+                "ffmpeg", "-y", "-t", str(max_s), "-i", str(input_path),
+                "-vf", f"fps=12,scale=-1:{height}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+                "-an",
                 str(out_path)
             ]
         elif kind == "sticker":
             out_path = out_path.with_suffix(".jpg")
             cmd = [
-                "ffmpeg", "-y", "-i", str(input_path),
+                "ffmpeg", "-y", "-vframes", "1", "-i", str(input_path),
                 str(out_path)
             ]
+        elif kind == "photo":
+            return self._photo_downscale(input_path)
         else:
             return input_path
 
         try:
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60)
             if out_path.exists():
                 return out_path
         except Exception as e:
@@ -95,31 +206,72 @@ class MediaAnalyzer:
         kind: str,
         file_unique_id: str,
         caption: Optional[str] = None,
-        priority: str = "P0"
+        priority: str = "P0",
+        lane: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """
-        Step 1: Check cache -> ffmpeg convert -> base64 inline call -> cache result in media_cache.
+        Step 1: cache -> convert (to_thread, не блокирует loop) -> base64 -> LLM -> cache.
+        Один file_unique_id разбирается один раз (in-flight дедуп).
+        lane: track для audio, media для остального — чтобы треки не ждали гифки.
         """
-        # 1. Check cache first
+        # 1. Кэш
         cached = await self.db.get_media_cache(file_unique_id)
         if cached:
             logger.info("Media %s served from cache", file_unique_id)
             return cached
 
-        # 2. Convert if needed
-        converted_path = self.convert_media_if_needed(file_path, kind)
+        # 2. In-flight дедуп: повторный запрос того же файла ждёт первый
+        existing = self._inflight.get(file_unique_id)
+        if existing and not existing.done():
+            try:
+                return await existing
+            except Exception:
+                pass
 
-        # 3. Read file into inline base64
+        task: asyncio.Task = asyncio.create_task(
+            self._analyze_uncached(file_path, kind, file_unique_id, caption, priority, lane)
+        )
+        self._inflight[file_unique_id] = task
         try:
-            with open(converted_path, "rb") as f:
-                b64_data = base64.b64encode(f.read()).decode("utf-8")
-        except Exception as e:
-            logger.error("Failed to read media file for inline base64: %s", e)
-            return None
+            return await task
         finally:
-            # Clean converted tmp if separate
+            self._inflight.pop(file_unique_id, None)
+
+    async def _analyze_uncached(
+        self,
+        file_path: Path,
+        kind: str,
+        file_unique_id: str,
+        caption: Optional[str],
+        priority: str,
+        lane: Optional[str],
+    ) -> Optional[dict[str, Any]]:
+        # Конвертация вне event loop (ffmpeg/PIL блокируют!)
+        try:
+            converted_path: Path = await asyncio.to_thread(
+                self.convert_media_if_needed, file_path, kind
+            )
+        except Exception as e:
+            logger.warning("Media convert to_thread failed: %s", e)
+            converted_path = file_path
+
+        # Чтение + base64 тоже вне loop
+        def _read_b64(p: Path) -> Optional[str]:
+            try:
+                with open(p, "rb") as f:
+                    return base64.b64encode(f.read()).decode("utf-8")
+            except Exception as e:
+                logger.error("Failed to read media file for inline base64: %s", e)
+                return None
+
+        b64_data = await asyncio.to_thread(_read_b64, converted_path)
+        try:
             if converted_path != file_path and converted_path.exists():
                 converted_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if not b64_data:
+            return None
 
         mime_type_map = {
             "voice": "audio/mp3",
@@ -157,13 +309,15 @@ class MediaAnalyzer:
 
         contents = [{"role": "user", "parts": parts}]
 
+        resolved_lane = lane or ("track" if kind == "audio" else "media")
         analysis_obj: Optional[MediaAnalysis] = await self.gateway.generate(
             prompt_name="media_analyze",
             contents=contents,
             system_instruction=system_instruction,
             priority=priority,
             response_schema=MediaAnalysis,
-            estimated_tokens=1500
+            estimated_tokens=1500,
+            lane=resolved_lane,
         )
 
         if not analysis_obj:
