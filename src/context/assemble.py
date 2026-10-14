@@ -148,6 +148,21 @@ class ContextAssembler:
             if thread_lines:
                 thread_excerpt_block = "\n".join(thread_lines)
 
+        # 4b. R5: цели нет в БД (старая/вычищена) — текст цели из слепка апдейта.
+        # Без этого реплай на старое сообщение приходит модели без контента.
+        if not thread_excerpt_block and reply_to_id and reply_to_id not in last_msg_ids:
+            snap = current_msg.get("reply_snapshot") or {}
+            if snap.get("text") and snap.get("message_id") == reply_to_id:
+                thread_excerpt_block = self._format_message_line(
+                    {
+                        "message_id": snap.get("message_id", 0),
+                        "user_id": snap.get("user_id"),
+                        "alias": snap.get("alias") or f"u{snap.get('user_id', 0)}",
+                        "nick": snap.get("nick", "User"),
+                        "text": snap.get("text", ""),
+                    }
+                )
+
         # 5. Dossiers: addressee + topic author + active in last 60 (up to DOSSIER_SLICES_MAX)
         addressee_id = current_msg.get("user_id")
         topic_author_id = current_msg.get("reply_to_user_id")

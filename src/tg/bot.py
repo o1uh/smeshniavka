@@ -36,6 +36,7 @@ from src.tg.stubs import (
     format_poll_stub,
     format_dice_stub,
     extract_clean_urls,
+    extract_reply_snapshot,
 )
 from src.tg.filters import RuntimeChatResolver, check_media_caps
 from src.ops.alerts import AlertManager
@@ -299,13 +300,18 @@ class FunnyBotApp:
         nick = sanitize_nick(user.full_name if user else "Anon", max_len=32)
         alias = f"u{user_id}" if user_id else "u0"
 
-        # Reply info
+        # Reply info + snapshot цели из апдейта (R5: нет в БД — из апдейта)
         reply_to_mid = message.reply_to_message.message_id if message.reply_to_message else None
         reply_to_uid = (
             message.reply_to_message.from_user.id
             if message.reply_to_message and message.reply_to_message.from_user
             else None
         )
+        try:
+            reply_snapshot = extract_reply_snapshot(message.reply_to_message)
+        except Exception as e:
+            logger.warning("Failed to extract reply snapshot: %s", e)
+            reply_snapshot = None
 
         msg_dict = {
             "chat_id": chat.id,
@@ -319,6 +325,7 @@ class FunnyBotApp:
             "file_unique_id": file_unique_id,
             "reply_to": reply_to_mid,
             "reply_to_user_id": reply_to_uid,
+            "reply_snapshot": reply_snapshot,
             "created_at": message.date.astimezone(timezone.utc).isoformat(),
         }
 
@@ -532,6 +539,33 @@ class FunnyBotApp:
             reply_to_message_id=message.message_id, priority="P0",
         )
 
+    async def _download_and_analyze(
+        self,
+        file_id: str,
+        file_unique_id: str,
+        kind: str,
+        caption: Optional[str],
+        priority: str = "P0",
+    ) -> Optional[dict[str, Any]]:
+        """Скачать файл TG в /tmp и прогнать шаг 1 анализа (кэш внутри)."""
+        download_path = Path(f"/tmp/smesh-{file_unique_id}")
+        try:
+            tg_file = await self.bot.get_file(file_id)
+            if tg_file.file_path:
+                await self.bot.download_file(tg_file.file_path, destination=download_path)
+                return await self.media_analyzer.analyze_media_step1(
+                    file_path=download_path,
+                    kind=kind,
+                    file_unique_id=file_unique_id,
+                    caption=caption,
+                    priority=priority,
+                )
+        except Exception as e:
+            logger.error("Error downloading/analyzing media: %s", e)
+        finally:
+            download_path.unlink(missing_ok=True)
+        return None
+
     async def _process_ping(
         self,
         message: types.Message,
@@ -546,22 +580,40 @@ class FunnyBotApp:
 
         # If media is present, do Step 1 media_analyze
         if media_kind and file_id and file_unique_id:
-            download_path = Path(f"/tmp/smesh-{file_unique_id}")
-            try:
-                tg_file = await self.bot.get_file(file_id)
-                if tg_file.file_path:
-                    await self.bot.download_file(tg_file.file_path, destination=download_path)
-                    media_cache_item = await self.media_analyzer.analyze_media_step1(
-                        file_path=download_path,
-                        kind=media_kind,
-                        file_unique_id=file_unique_id,
-                        caption=message.caption,
-                        priority="P0"
-                    )
-            except Exception as e:
-                logger.error("Error downloading/analyzing media: %s", e)
-            finally:
-                download_path.unlink(missing_ok=True)
+            media_cache_item = await self._download_and_analyze(
+                file_id, file_unique_id, media_kind, message.caption, priority="P0"
+            )
+
+        # R5/TB-07: реплай-цель с вложением — медиа-пинг. file_id брать из
+        # reply_to_message апдейта даже если цели нет в БД; анализ P0 в капах
+        # обязателен, заглушка «только мета» запрещена.
+        if not media_cache_item:
+            snap = msg_dict.get("reply_snapshot") or {}
+            r_kind = snap.get("media_kind")
+            r_fid = snap.get("file_id")
+            r_uid = snap.get("file_unique_id")
+            if (
+                r_kind in ("voice", "video_note", "video", "photo", "audio", "animation")
+                and r_fid and r_uid
+            ):
+                r_allowed, r_reason = check_media_caps(
+                    r_kind, snap.get("file_size") or 0, snap.get("duration"), self.config.limits
+                )
+                if not r_allowed:
+                    logger.info("Reply-target media rejected before download: %s", r_reason)
+                else:
+                    try:
+                        cached = await self.db.get_media_cache(r_uid)
+                    except Exception as e:
+                        logger.warning("Media cache lookup failed: %s", e)
+                        cached = None
+                    if cached:
+                        logger.info("Reply-target media %s served from cache", r_uid)
+                        media_cache_item = cached
+                    else:
+                        media_cache_item = await self._download_and_analyze(
+                            r_fid, r_uid, r_kind, snap.get("caption"), priority="P0"
+                        )
 
         # Assemble context
         mode = "media_reply" if media_cache_item else "ping"
