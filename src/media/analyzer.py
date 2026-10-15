@@ -352,7 +352,7 @@ class MediaAnalyzer:
 
         system_instruction = self.prompts.build_system_instruction(
             mode_or_modular="media_analyze",
-            bot_name="Смешнявка"
+            bot_name="Дик"
         )
 
         parts: list[dict[str, Any]] = [

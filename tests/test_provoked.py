@@ -20,9 +20,8 @@ def test_bait_patterns():
 
 
 def test_mention_counts_as_directed():
-    assert P.is_provoked("смешнявка ты мразь", mentions_bot=True) is True
-    assert P.is_provoked("@smaxshnyavka_bot ты дно", mentions_bot=True) is True
-    assert P.is_provoked("дик ты даун", mentions_bot=True) is True
+    assert P.is_provoked("дик ты мразь", mentions_bot=True) is True
+    assert P.is_provoked("@dik_bot ты дно", mentions_bot=True) is True
 
 
 def test_tell_off_needs_directed():

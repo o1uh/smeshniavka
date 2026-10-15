@@ -171,8 +171,8 @@ def test_research_triggers():
     )
 
     # Force triggers
-    assert mod.should_force_search("смешнявка, сделай ресерч пожалуйста") is True
-    assert mod.should_force_search("смешнявка, сделай ресёрч пожалуйста") is True
+    assert mod.should_force_search("дик, сделай ресерч пожалуйста") is True
+    assert mod.should_force_search("дик, сделай ресёрч пожалуйста") is True
     assert mod.should_force_search("прогугли что там") is True
     assert mod.should_force_search("поищи инфу") is True
     assert mod.should_force_search("какие новости сегодня") is True
@@ -189,13 +189,19 @@ def test_research_triggers():
 
 
 def test_anonymize_query():
-    raw = "кто такой @vladimir u123456 и 1234567890 смешнявка?"
-    anon = anonymize_query(raw, known_nicks=["vladimir"], bot_aliases=["смешнявка"])
+    raw = "кто такой @vladimir u123456 и 1234567890 дик?"
+    anon = anonymize_query(raw, known_nicks=["vladimir"], bot_aliases=["дик"])
     assert "@vladimir" not in (anon or "")
     assert "u123456" not in (anon or "")
     assert "1234567890" not in (anon or "")
-    assert "смешнявка" not in (anon or "")
+    assert "дик" not in (anon or "").lower()
     assert "кто такой" in (anon or "")
+
+
+def test_anonymize_keeps_dikij_intact():
+    """«дикий» — обычное слово, вырезать из него «дик» нельзя."""
+    anon = anonymize_query("дикий трек", known_nicks=[], bot_aliases=["дик"])
+    assert anon == "дикий трек"
 
 
 def test_convert_contents_with_search_query_directive():

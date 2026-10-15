@@ -58,7 +58,7 @@ async def test_history_arrow_includes_target_alias():
         {"message_id": 10, "user_id": 7, "alias": "u7", "nick": "Петя", "text": "трек для оценки", "reply_to": None, "reply_to_user_id": None},
         {"message_id": 11, "user_id": 5, "alias": "u5", "nick": "Миша", "text": "оцени", "reply_to": 10, "reply_to_user_id": 7},
     ]
-    current = {"message_id": 12, "user_id": 5, "alias": "u5", "nick": "Миша", "text": "смешнявка оцени", "reply_to": 10, "reply_to_user_id": 7}
+    current = {"message_id": 12, "user_id": 5, "alias": "u5", "nick": "Миша", "text": "дик оцени", "reply_to": 10, "reply_to_user_id": 7}
     asm = _assembler(StubDB(last=last))
     _, contents = await asm.assemble(chat_id=1, current_msg=current, mode="ping")
     text = _contents_text(contents)
@@ -73,7 +73,7 @@ async def test_current_block_shows_reply_target_explicit():
     ]
     current = {
         "message_id": 12, "user_id": 5, "alias": "u5", "nick": "Миша",
-        "text": "смешнявка оцени трек", "reply_to": 10, "reply_to_user_id": 7,
+        "text": "дик оцени трек", "reply_to": 10, "reply_to_user_id": 7,
         "reply_target": {"message_id": 10, "user_id": 7, "alias": "u7", "nick": "Петя", "text": "трек для оценки"},
     }
     asm = _assembler(StubDB(last=last))
@@ -90,7 +90,7 @@ async def test_current_resolves_target_from_db_without_embedded():
     by_id = {
         10: {"message_id": 10, "user_id": 7, "alias": "u7", "nick": "Петя", "text": "мой новый трек", "reply_to": None, "reply_to_user_id": None},
     }
-    current = {"message_id": 12, "user_id": 5, "alias": "u5", "nick": "Миша", "text": "смешнявка че скажешь", "reply_to": 10, "reply_to_user_id": 7}
+    current = {"message_id": 12, "user_id": 5, "alias": "u5", "nick": "Миша", "text": "дик че скажешь", "reply_to": 10, "reply_to_user_id": 7}
     asm = _assembler(StubDB(last=last, by_id=by_id))
     _, contents = await asm.assemble(chat_id=1, current_msg=current, mode="ping")
     text = _contents_text(contents)

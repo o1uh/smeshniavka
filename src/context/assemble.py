@@ -136,7 +136,7 @@ class ContextAssembler:
         # 1. Build System Instruction
         system_instruction = self.prompts.build_system_instruction(
             mode_or_modular=mode,
-            bot_name="Смешнявка",
+            bot_name="Дик",
             now_str=now_str,
             style_examples=style_examples,
             summary_tok=self.bot_config.SUMMARY_TOK,

@@ -33,10 +33,14 @@ def anonymize_query(
             if nick and len(nick) >= 3:
                 clean = re.sub(re.escape(nick), "", clean, flags=re.IGNORECASE)
 
-    aliases = list(bot_aliases or []) + ["смешнявка", "смешняв", "смешнявки", "смешнявке", "смешнявку", "дик", "дика", "дику"]
+    aliases = list(bot_aliases or []) + ["дик", "дика", "дику", "диком", "дике"]
     for alias in aliases:
         if alias and len(alias) >= 3:
-            clean = re.sub(re.escape(alias), "", clean, flags=re.IGNORECASE)
+            if len(alias) <= 4:
+                # короткий алиас — только целым словом, иначе «дикий» превратится в «ий»
+                clean = re.sub(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", "", clean, flags=re.IGNORECASE)
+            else:
+                clean = re.sub(re.escape(alias), "", clean, flags=re.IGNORECASE)
 
     clean = re.sub(r"\s+", " ", clean).strip()
     # If query is too short after anonymization, cannot search
@@ -200,7 +204,7 @@ class ResearchModule:
 
         system_instruction = self.prompts.build_system_instruction(
             mode_or_modular="research_decide",
-            bot_name="Смешнявка"
+            bot_name="Дик"
         )
         cur_payload = current_text
         if extra_context:

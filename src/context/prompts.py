@@ -50,7 +50,7 @@ class PromptBuilder:
     def build_system_instruction(
         self,
         mode_or_modular: str,
-        bot_name: str = "Смешнявка",
+        bot_name: str = "Дик",
         now_str: str = "",
         style_examples: Optional[list[str]] = None,
         summary_tok: int = 800,

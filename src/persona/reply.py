@@ -44,12 +44,17 @@ class PingDetector:
         if f"@{self.bot_username}" in text:
             return True
 
-        # 3. Alias match (word starting with alias)
+        # 3. Alias match. Короткие алиасы (<=4 символов: дик, дика...)
+        # только точным совпадением слова — иначе «дикий»/«дикарь» дадут ложный пинг.
+        # Длинные — префиксом (покрывает падежи и растягивания).
         words = text.split()
         for w in words:
             clean_w = "".join(c for c in w if c.isalnum() or c in ("-", "_"))
             for alias in self.aliases:
-                if clean_w.startswith(alias):
+                if len(alias) <= 4:
+                    if clean_w == alias:
+                        return True
+                elif clean_w.startswith(alias):
                     return True
 
         # 4. Follow-up: только reply на сообщение бота в окне (R1):

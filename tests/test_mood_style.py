@@ -155,6 +155,21 @@ async def test_ai_eviction_may_drop_nothing(tmp_path):
     assert data["pinned"] == ["бум"]
 
 
+# --- 9. Алиас «дик»: точное слово, без ложных пингов ---
+
+def test_dik_alias_exact_word():
+    from src.persona.reply import PingDetector
+    from src.ops.config import BotConfig
+    cfg = BotConfig()
+    cfg.BOT_ALIASES = ["дик", "дика", "дику", "диком", "дике"]
+    det = PingDetector("dik_bot", 999, cfg)
+    base = {"user_id": 1, "reply_to_user_id": None}
+    assert det.is_ping({**base, "text": "дик, оцени трек"}) is True
+    assert det.is_ping({**base, "text": "дика, че скажешь"}) is True
+    assert det.is_ping({**base, "text": "дикий трек"}) is False
+    assert det.is_ping({**base, "text": "индикатор горит"}) is False
+
+
 # --- 3. Тишина без LLM ---
 
 def test_silent_audio_item():

@@ -1,4 +1,4 @@
-# Основной конфиг «Смешнявки»
+# Основной конфиг «Дика»
 # Числовые лимиты соответствуют спецификации R1-R13
 
 ALLOWED_CHAT_ID: 0 # ID целевого чата из discover (отрицательный для супергрупп)
@@ -6,7 +6,7 @@ OWNER_IDS: []      # ID владельцев бота (также могут б�
 MODEL_ID: "fast"   # Быстрейшая модель через Antigravity Fast Bridge (алиас gemini-3.8-flash-low)
 BRIDGE_URL: "http://127.0.0.1:8000" # URL моста на RPi (или http://rpi.ln:8000 при внешнем запуске)
 TZ: "Asia/Novosibirsk"
-BOT_ALIASES: ["дик", "смешнявка"]
+BOT_ALIASES: ["дик", "дика", "дику", "диком", "дике"]
 SAFETY: "all OFF"
 PII_SCRUB: true
 LOG_CONTENT: false

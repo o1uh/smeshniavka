@@ -1,5 +1,5 @@
 [Unit]
-Description=Funny Bot (Смешнявка) Telegram Daemon
+Description=Funny Bot (Дик) Telegram Daemon
 After=network-online.target
 Wants=network-online.target
 

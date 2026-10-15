@@ -56,7 +56,7 @@ class BotConfig(BaseModel):
     MODEL_ID: str = "fast"
     BRIDGE_URL: str = "http://127.0.0.1:8000"
     TZ: str = "Asia/Novosibirsk"
-    BOT_ALIASES: list[str] = Field(default_factory=lambda: ["дик", "смешнявка"])
+    BOT_ALIASES: list[str] = Field(default_factory=lambda: ["дик", "дика", "дику", "диком", "дике"])
     SAFETY: str = "all OFF"
     PII_SCRUB: bool = True
     LOG_CONTENT: bool = False

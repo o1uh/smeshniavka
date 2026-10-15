@@ -261,7 +261,7 @@ class FunnyBotApp:
                 "message_id": message_id,
                 "user_id": self.bot_id,
                 "alias": f"u{self.bot_id}" if self.bot_id else "u0",
-                "nick": "Смешнявка",
+                "nick": "Дик",
                 "text": text,
                 "reply_to": reply_to,
                 "is_bot": 1,
@@ -405,7 +405,7 @@ class FunnyBotApp:
         if chat.type == ChatType.PRIVATE:
             if user and user.id in self.bot_cfg.OWNER_IDS:
                 if text.strip().startswith("/start"):
-                    await message.answer("Смешнявка на связи. Алерты будут приходить сюда.")
+                    await message.answer("Дик на связи. Алерты будут приходить сюда.")
                 elif text.strip().startswith("/status"):
                     summary = self.gateway.get_key_status_summary()
                     await message.answer(f"Статус ключей: {json.dumps(summary, indent=2)}")
@@ -633,7 +633,7 @@ class FunnyBotApp:
             bridge_status = "✅ OK" if key_summary.get("bridge_status") == "ok" else "❌ DOWN"
             bridge_url = key_summary.get("bridge_url", self.bot_cfg.BRIDGE_URL)
             status_text = (
-                f"🤖 <b>Смешнявка</b>{shadow_tag}\n"
+                f"🤖 <b>Дик</b>{shadow_tag}\n"
                 f"Аптайм: {uptime_min:.1f} мин\n"
                 f"Модель: <code>{self.bot_cfg.MODEL_ID}</code>\n"
                 f"Мост Antigravity: {bridge_status} (<code>{bridge_url}</code>)\n"
@@ -947,7 +947,8 @@ class FunnyBotApp:
         _mentions = (f"@{self.bot_username}".lower() in t_low) if getattr(self, "bot_username", "") else False
         if not _mentions:
             for _a in (self.bot_cfg.BOT_ALIASES or []):
-                if _a and _a.lower() in t_low:
+                # по границам слова: «дик» внутри «дикий» — не упоминание
+                if _a and re.search(r"(?<!\w)" + re.escape(_a.lower()) + r"(?!\w)", t_low):
                     _mentions = True
                     break
         provoked = ProvocationDetector.is_provoked(

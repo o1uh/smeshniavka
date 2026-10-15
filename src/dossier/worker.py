@@ -118,7 +118,7 @@ class DossierWorker:
         # 4. System instruction and contents
         system_instruction = self.prompts.build_system_instruction(
             mode_or_modular="dossier_extract",
-            bot_name="Смешнявка",
+            bot_name="Дик",
             now_str=self._get_tz_today(),
             summary_tok=self.config.SUMMARY_TOK
         )

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Funny Bot («Смешнявка») Deployment Script for Raspberry Pi
+# Funny Bot («Дик») Deployment Script for Raspberry Pi
 # Target directory: /opt/smeshniavka
 # Default host: pi@rpi.ln
 # Default SSH key: ~/.ssh/rpi_router_id_ed25519
@@ -10,7 +10,7 @@ RPI_HOST="${1:-pi@rpi.ln}"
 SSH_KEY="${2:-$HOME/.ssh/rpi_router_id_ed25519}"
 REMOTE_DIR="/opt/smeshniavka"
 
-echo "=== Деплой Funny Bot («Смешнявка») на Raspberry Pi (${RPI_HOST}) ==="
+echo "=== Деплой Funny Bot («Дик») на Raspberry Pi (${RPI_HOST}) ==="
 
 SSH_OPTS=()
 if [ -f "${SSH_KEY}" ]; then
