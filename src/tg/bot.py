@@ -491,6 +491,12 @@ class FunnyBotApp:
             "created_at": to_iso_date(message.date),
         }
 
+        # Check /logs command early: must never be saved to database or pollute context
+        clean_text = (text or "").strip()
+        if clean_text.startswith("/logs") or clean_text.startswith("/logs@"):
+            await self._handle_logs_command(message, msg_dict)
+            return
+
         # Save to database
         await self.db.save_message(msg_dict)
         logger.info(
@@ -729,7 +735,77 @@ class FunnyBotApp:
             await message.reply("🔄 Цикл досье и саммари запущен вручную.")
             return True
 
+        elif text.startswith("/logs"):
+            await self._handle_logs_command(message, msg_dict)
+            return True
+
         return False
+
+    async def _handle_logs_command(self, message: types.Message, msg_dict: dict[str, Any]) -> None:
+        """Outputs last n log lines (default 15, max 50). Admin-only, excluded from context."""
+        user_id = msg_dict.get("user_id")
+        chat_id = message.chat.id
+        if not await self._is_admin(chat_id, user_id):
+            await message.reply("Команда доступна только админам.")
+            return
+
+        text = (msg_dict.get("text") or "").strip()
+        match = re.search(r"^/logs(?:@\w+)?(?:\s+(\d+))?", text)
+        n = 15
+        if match and match.group(1):
+            try:
+                n = int(match.group(1))
+            except ValueError:
+                n = 15
+        n = max(1, min(50, n))
+
+        log_path = Path("logs/bot.log")
+        if not log_path.exists():
+            await message.reply("Лог-файл пуст или ещё не создан.")
+            return
+
+        try:
+            from collections import deque
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = [line.rstrip("\r\n") for line in deque(f, maxlen=n)]
+        except Exception as e:
+            logger.error("Failed to read log file %s: %s", log_path, e)
+            await message.reply(f"Ошибка при чтении логов: {e}")
+            return
+
+        if not lines:
+            await message.reply("Логи пусты.")
+            return
+
+        import html
+        escaped_lines = [html.escape(l) for l in lines]
+        full_text = "\n".join(escaped_lines)
+
+        if len(full_text) <= 3800:
+            try:
+                await message.reply(f"<pre><code class=\"language-log\">{full_text}</code></pre>", parse_mode="HTML")
+            except Exception:
+                await message.reply("\n".join(lines)[:4000])
+        else:
+            chunks: list[str] = []
+            cur_chunk: list[str] = []
+            cur_len = 0
+            for l in escaped_lines:
+                if cur_len + len(l) + 1 > 3800:
+                    if cur_chunk:
+                        chunks.append("\n".join(cur_chunk))
+                        cur_chunk = []
+                        cur_len = 0
+                cur_chunk.append(l)
+                cur_len += len(l) + 1
+            if cur_chunk:
+                chunks.append("\n".join(cur_chunk))
+
+            for chunk in chunks:
+                try:
+                    await message.reply(f"<pre><code class=\"language-log\">{chunk}</code></pre>", parse_mode="HTML")
+                except Exception:
+                    await message.reply(chunk[:4000])
 
     async def _process_who(
         self, message: types.Message, msg_dict: dict[str, Any], text: str

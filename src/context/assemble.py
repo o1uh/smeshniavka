@@ -191,6 +191,8 @@ class ContextAssembler:
 
         active_counts: dict[int, int] = {}
         for m in last_msgs:
+            if (m.get("text") or "").strip().startswith("/logs"):
+                continue
             uid = m.get("user_id")
             if uid:
                 active_counts[uid] = active_counts.get(uid, 0) + 1
@@ -224,6 +226,8 @@ class ContextAssembler:
         history_lines = []
         for m in last_msgs:
             if m["message_id"] != current_msg.get("message_id"):
+                if (m.get("text") or "").strip().startswith("/logs"):
+                    continue
                 line = self._format_message_line(m, alias_map)
                 history_lines.append(line)
         history_block = "\n".join(history_lines) if history_lines else None
