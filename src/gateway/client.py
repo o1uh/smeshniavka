@@ -491,8 +491,22 @@ class AntigravityGateway(Gateway):
                 message_obj = choice.get("message", {})
                 raw_text = message_obj.get("content", "")
 
-                if choice.get("finish_reason") in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
-                    logger.warning("Generation blocked by safety filter")
+                is_safety_blocked = choice.get("finish_reason") in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST")
+                if not is_safety_blocked and raw_text:
+                    lower_raw = raw_text.lower()
+                    if (
+                        "sensitive words" in lower_raw
+                        or "prohibited use policy" in lower_raw
+                        or "prompt could not be submitted" in lower_raw
+                        or "violate google's" in lower_raw
+                        or "violate generative ai" in lower_raw
+                    ):
+                        is_safety_blocked = True
+
+                if is_safety_blocked:
+                    logger.warning("Generation blocked by safety filter: %.120s", raw_text)
+                    if session_id:
+                        asyncio.create_task(self.reset_session(session_id))
                     return {"is_blocked": True}
 
                 # Parse JSON schema if expected

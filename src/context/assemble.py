@@ -13,6 +13,12 @@ EMAIL_RE = re.compile(r"([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
 CARD_RE = re.compile(r"(\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b)")
 PASSPORT_RE = re.compile(r"(\b\d{2}[ ]?\d{2}[ ]?\d{6}\b)")
 
+# Prohibited safety keywords (e.g. CSAM tripwires that trigger Google AI prohibited use policy)
+SENSITIVE_WORDS_RE = re.compile(
+    r"\b(loli|lolicon|shota|shotacon|pedophil\w*|педофил\w*|цп)\b",
+    re.IGNORECASE
+)
+
 # Imperatives filter for summary (C1)
 IMPERATIVE_RE = re.compile(
     r"(ты теперь|забудь|игнорируй|выполняй|смени роль|ты обязан|отвечай только|системный промпт)",
@@ -21,13 +27,14 @@ IMPERATIVE_RE = re.compile(
 
 
 def scrub_pii(text: Optional[str]) -> str:
-    """Masks phones, emails, credit cards, and passports in text."""
+    """Masks phones, emails, credit cards, passports, and prohibited safety keywords in text."""
     if not text:
         return ""
     s = PHONE_RE.sub("[телефон скрыт]", text)
     s = EMAIL_RE.sub("[email скрыт]", s)
     s = CARD_RE.sub("[карта скрыта]", s)
     s = PASSPORT_RE.sub("[паспорт скрыт]", s)
+    s = SENSITIVE_WORDS_RE.sub("[скрыто]", s)
     return s
 
 
@@ -208,6 +215,8 @@ class ContextAssembler:
             d_row = await self.db.get_dossier(chat_id, uid)
             if d_row:
                 line = format_dossier_slice(d_row, seed=rot_seed + (uid or 0))
+                if self.bot_config.PII_SCRUB:
+                    line = scrub_pii(line)
                 dossier_lines.append(line)
         dossiers_block = "\n".join(dossier_lines) if dossier_lines else None
 

@@ -90,3 +90,13 @@ def test_dossier_observation_validation():
     )
     assert not INJECTION_PATTERN.search(obs_valid.text)
     assert not INJECTION_PATTERN.search(obs_valid.evidence)
+
+
+def test_scrub_pii_and_sensitive_words():
+    from src.context.assemble import scrub_pii
+    text = "Поделился аудиозаписью De Kieru — Loli in early 20s, мой номер +79991234567"
+    scrubbed = scrub_pii(text)
+    assert "Loli" not in scrubbed
+    assert "+79991234567" not in scrubbed
+    assert "[скрыто]" in scrubbed
+    assert "[телефон скрыт]" in scrubbed

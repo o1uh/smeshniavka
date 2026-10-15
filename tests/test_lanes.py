@@ -120,3 +120,36 @@ def test_gateway_track_two_slots():
     assert gw.track_max == 2
     assert gw.chat_max == 1
     assert gw._lane_limit("track") == 2
+
+
+@pytest.mark.asyncio
+async def test_is_admin_check():
+    from unittest.mock import AsyncMock, MagicMock
+    from src.tg.bot import FunnyBotApp
+
+    app = MagicMock(spec=FunnyBotApp)
+    app.bot_cfg = MagicMock()
+    app.bot_cfg.OWNER_IDS = [12345]
+    app.bot = MagicMock()
+
+    # 1. Owner
+    res = await FunnyBotApp._is_admin(app, chat_id=-1001, user_id=12345)
+    assert res is True
+
+    # 2. None
+    res_none = await FunnyBotApp._is_admin(app, chat_id=-1001, user_id=None)
+    assert res_none is False
+
+    # 3. Chat admin
+    member_admin = MagicMock()
+    member_admin.status = "administrator"
+    app.bot.get_chat_member = AsyncMock(return_value=member_admin)
+    res_admin = await FunnyBotApp._is_admin(app, chat_id=-1001, user_id=999)
+    assert res_admin is True
+
+    # 4. Regular member
+    member_user = MagicMock()
+    member_user.status = "member"
+    app.bot.get_chat_member = AsyncMock(return_value=member_user)
+    res_user = await FunnyBotApp._is_admin(app, chat_id=-1001, user_id=888)
+    assert res_user is False

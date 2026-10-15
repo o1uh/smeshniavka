@@ -16,7 +16,7 @@ from src.ops.log import logger, shadow_logger
 from src.db.manager import DatabaseManager
 from src.db.contracts import TgSender
 from src.gateway.client import GeminiGateway
-from src.context.assemble import ContextAssembler
+from src.context.assemble import ContextAssembler, scrub_pii
 from src.context.prompts import PromptBuilder, sanitize_nick
 from src.persona.reply import PingDetector, AuthorSpamLimiter, TgSendQueue
 from src.persona.proactive import ProactiveEngine
@@ -131,9 +131,10 @@ def extract_media_info(message: types.Message) -> ExtractedMedia:
         meta_parts = []
         if message.audio.performer:
             meta_parts.append(message.audio.performer)
-        if message.audio.title:
-            meta_parts.append(message.audio.title)
-        audio_info = f" ({' - '.join(meta_parts)})" if meta_parts else ""
+        meta_str = ' - '.join(meta_parts)
+        if meta_str:
+            meta_str = scrub_pii(meta_str)
+        audio_info = f" ({meta_str})" if meta_str else ""
         text_stub = f"[аудио{audio_info}]"
     elif message.poll:
         media_kind = "poll"
@@ -622,6 +623,18 @@ class FunnyBotApp:
         except Exception as e:
             logger.warning("Background style promote failed: %s", e)
 
+    async def _is_admin(self, chat_id: int, user_id: Optional[int]) -> bool:
+        """True if user is in OWNER_IDS or is a Telegram chat administrator/creator."""
+        if not user_id:
+            return False
+        if user_id in self.bot_cfg.OWNER_IDS:
+            return True
+        try:
+            member = await self.bot.get_chat_member(chat_id, user_id)
+            return member.status in ("creator", "administrator")
+        except Exception:
+            return False
+
     async def _handle_commands(self, message: types.Message, msg_dict: dict[str, Any]) -> bool:
         text = (msg_dict.get("text") or "").strip()
         user_id = msg_dict.get("user_id")
@@ -643,6 +656,9 @@ class FunnyBotApp:
             return True
 
         elif text.startswith("/reset"):
+            if not await self._is_admin(message.chat.id, user_id):
+                await message.reply("Команда доступна только админам.")
+                return True
             ok_any = False
             for lane in (LANE_CHAT, f"{LANE_TRACK}1", f"{LANE_TRACK}2", LANE_MEDIA):
                 try:

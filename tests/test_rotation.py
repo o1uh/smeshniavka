@@ -132,6 +132,35 @@ async def test_bridge_blocked_by_safety():
 
 
 @pytest.mark.asyncio
+async def test_bridge_blocked_by_sensitive_words_text():
+    app_cfg = make_test_config()
+
+    def handler(request: httpx.Request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The prompt could not be submitted. The prompt contains sensitive words that violate Google's [Generative AI Prohibited Use policy](https://policies.google.com/terms/generative-ai/use-policy)."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ]
+            }
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        gw = AntigravityGateway(app_cfg, http_client=client)
+
+        res = await gw.generate("test_prompt", [], priority="P0")
+        assert res == {"is_blocked": True}
+
+
+@pytest.mark.asyncio
 async def test_bridge_error_returns_degraded_for_p0():
     app_cfg = make_test_config()
 
