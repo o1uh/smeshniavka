@@ -1,4 +1,4 @@
--- Схема базы данных SQLite «Смешнявки» (WAL mode, UTC время)
+-- Схема базы данных SQLite «Дика» (WAL mode, UTC время)
 
 CREATE TABLE IF NOT EXISTS messages (
     chat_id INTEGER NOT NULL,

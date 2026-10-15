@@ -176,9 +176,10 @@ class AntigravityGateway(Gateway):
         self.chat_max = getattr(self.bot_config, "CHAT_MAX_CONCURRENT", 2)
         self.track_max = getattr(self.bot_config, "TRACK_MAX_CONCURRENT", 1)
         self.media_max = getattr(self.bot_config, "MEDIA_MAX_CONCURRENT", 1)
+        self.sys_max = getattr(self.bot_config, "SYS_MAX_CONCURRENT", 1)
         self._current_total = 0
         self._current_p2 = 0
-        self._lane_counts: dict[str, int] = {"chat": 0, "track": 0, "media": 0}
+        self._lane_counts: dict[str, int] = {"chat": 0, "track": 0, "media": 0, "sys": 0}
         self._lock = asyncio.Lock()
 
         # Monitoring & status metrics
@@ -279,14 +280,14 @@ class AntigravityGateway(Gateway):
     @staticmethod
     def lane_for_prompt(prompt_name: str, lane: Optional[str] = None) -> str:
         """Маппинг промпта на воркер-лейн. Явный lane всегда побеждает."""
-        if lane in ("chat", "track", "media"):
+        if lane in ("chat", "track", "media", "sys"):
             return lane
         if prompt_name in ("persona_media_reply", "media_analyze"):
             # без явного lane не угадаешь трек vs остальное — по дефолту media,
             # трек-коллеры передают lane="track" явно
             return "media"
-        if prompt_name in ("dossier_extract", "dossier_consolidate", "summary_chunk", "summary_merge"):
-            return "media"
+        if prompt_name in ("dossier_extract", "dossier_consolidate", "summary_chunk", "summary_merge", "style_filter"):
+            return "sys"
         return "chat"
 
     def _lane_limit(self, lane: str) -> int:
@@ -294,6 +295,8 @@ class AntigravityGateway(Gateway):
             return self.track_max
         if lane == "media":
             return self.media_max
+        if lane == "sys":
+            return self.sys_max
         return self.chat_max
 
     def _lane_timeout(self, lane: str) -> float:
@@ -301,6 +304,8 @@ class AntigravityGateway(Gateway):
             return float(getattr(self.bot_config, "TRACK_TIMEOUT_S", 50.0))
         if lane == "media":
             return float(getattr(self.bot_config, "MEDIA_TIMEOUT_S", 75.0))
+        if lane == "sys":
+            return float(getattr(self.bot_config, "SYS_TIMEOUT_S", 75.0))
         return float(getattr(self.bot_config, "CHAT_TIMEOUT_S", 35.0))
 
     async def _acquire_slot(self, priority: str, lane: str = "chat") -> bool:

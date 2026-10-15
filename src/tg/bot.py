@@ -20,7 +20,10 @@ from src.context.assemble import ContextAssembler
 from src.context.prompts import PromptBuilder, sanitize_nick
 from src.persona.reply import PingDetector, AuthorSpamLimiter, TgSendQueue
 from src.persona.proactive import ProactiveEngine
+from src.persona.mood import detect_mood
 from src.persona.sanitizer import (
+    has_comma_glue,
+    is_repetitive,
     replace_un_aliases,
     has_persona_leak,
     clean_media_reply_boilerplate,
@@ -29,9 +32,11 @@ from src.persona.sanitizer import (
 from src.gateway.schemas import PersonaTextReply
 from src.dossier.worker import DossierWorker
 from src.media.analyzer import MediaAnalyzer, contains_forbidden_score, SCORE_PATTERN, build_step2_media_json
-from src.research.search import ResearchModule
-from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA
+from src.research.search import ResearchModule, build_media_search_query
+from src.tg.lanes import LanePool, LaneWorker, LaneJob, route_lane, LANE_CHAT, LANE_TRACK, LANE_MEDIA, LANE_SYS
 from src.antijob.detector import ProvocationDetector
+from src.style.learner import StyleLearner
+from src.tg.reactions import ReactionsTracker
 from src.tg.stubs import (
     format_sticker_stub,
     format_animation_stub,
@@ -213,6 +218,12 @@ class FunnyBotApp:
         self.dossier_worker = DossierWorker(self.bot_cfg, self.db, self.gateway, self.prompts)
         self.media_analyzer = MediaAnalyzer(self.bot_cfg, self.db, self.gateway, self.prompts)
         self.research = ResearchModule(self.bot_cfg, self.db, self.gateway, self.prompts)
+        self.style_learner = StyleLearner(self.bot_cfg, self.db, self.gateway)
+        self.send_queue.on_sent = self._on_bot_sent
+        self.reactions = ReactionsTracker(
+            laugh_emojis=set(getattr(self.bot_cfg, "REACT_LAUGH_EMOJIS", None) or {"😁", "😂", "🤣", "😆", "😹", "🤭"}),
+            threshold=int(getattr(self.bot_cfg, "REACT_LAUGH_THRESHOLD", 4) or 4),
+        )
 
         self.ping_detector: Optional[PingDetector] = None
         self.bot_id = 0
@@ -220,12 +231,15 @@ class FunnyBotApp:
         self.start_time = time.time()
         self.muted_until: float = 0.0
 
-        # Три воркера: chat — дефолтное общение, track — треки, media — остальное.
+        # Воркеры: chat (общение) / track x2 (треки) / media (остальное) / sys (фон).
+        # У трековых воркеров разные имена → разные тёплые сессии моста.
         qmax = int(getattr(self.bot_cfg, "WORKER_QUEUE_MAX", 30) or 30)
         self.lanes = LanePool(
             chat=LaneWorker(LANE_CHAT, max_queue=qmax),
-            track=LaneWorker(LANE_TRACK, max_queue=qmax),
+            track=LaneWorker(f"{LANE_TRACK}1", max_queue=qmax),
+            track2=LaneWorker(f"{LANE_TRACK}2", max_queue=qmax),
             media=LaneWorker(LANE_MEDIA, max_queue=qmax),
+            sys=LaneWorker(LANE_SYS, max_queue=qmax),
         )
 
         self._setup_handlers()
@@ -234,6 +248,77 @@ class FunnyBotApp:
         self.dp.message.register(self.handle_message)
         self.dp.edited_message.register(self.handle_edited_message)
         self.dp.my_chat_member.register(self.handle_my_chat_member)
+        self.dp.message_reaction.register(self.handle_reaction)
+
+    async def _on_bot_sent(
+        self, chat_id: int, message_id: int, text: str, reply_to: Optional[int]
+    ) -> None:
+        """Пишем свои исходящие в БД: модель видит свои реплики в истории,
+        а смеяки на них резолвят текст для прайм-кандидатов. Best-effort."""
+        try:
+            await self.db.save_message({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "user_id": self.bot_id,
+                "alias": f"u{self.bot_id}" if self.bot_id else "u0",
+                "nick": "Дик",
+                "text": text,
+                "reply_to": reply_to,
+                "is_bot": 1,
+                "created_at": to_iso_date(time.time()),
+            })
+        except Exception as e:
+            logger.warning("Failed to save outgoing message %s/%s: %s", chat_id, message_id, e)
+
+    async def handle_reaction(self, event: Any) -> None:
+        """Смеяки: 3+ distinct — сразу в банк, 1–2 — в очередь на отбор.
+
+        В банк кладём ответ вместе с контекстом (на что отвечали), чтобы
+        пример нёс ситуацию. Чистку переполненного банка делает sys-воркер.
+        """
+        try:
+            chat = event.chat
+            if not self.chat_resolver.is_allowed(chat.id):
+                return
+            emojis: set[str] = set()
+            for r in (getattr(event, "new_reaction", None) or []):
+                if getattr(r, "type", None) == "emoji" and getattr(r, "emoji", None):
+                    emojis.add(r.emoji)
+            user = getattr(event, "user", None)
+            signal = self.reactions.handle(
+                chat.id, event.message_id,
+                getattr(user, "id", None), emojis,
+            )
+            if not signal:
+                return
+            row = await self.db.get_message(chat.id, event.message_id)
+            if not row or not (row.get("text") or "").strip():
+                return
+            # Контекст: на что был ответ (текст цели реплая, если есть)
+            ctx = None
+            try:
+                target_id = row.get("reply_to")
+                if target_id:
+                    target = await self.db.get_message(chat.id, target_id)
+                    if target and (target.get("text") or "").strip():
+                        ctx = target["text"][:200]
+            except Exception:
+                ctx = None
+            laughs = self.reactions.laugh_count(chat.id, event.message_id)
+            added = await self.style_learner.collect_reacted(
+                chat.id, row.get("user_id"), row.get("text"),
+                direct=(signal == "bank"), ctx=ctx, laughs=laughs,
+            )
+            if added:
+                job = LaneJob(
+                    lane=LANE_SYS,
+                    label=f"style-cap#{event.message_id}",
+                    coro_factory=lambda: self.style_learner.ensure_capacity(),
+                    enqueued_at=time.time(),
+                )
+                await self.lanes.get(LANE_SYS).submit(job)
+        except Exception as e:
+            logger.warning("Reaction handling failed: %s", e)
 
     async def initialize(self) -> None:
         me = await self.bot.get_me()
@@ -249,7 +334,7 @@ class FunnyBotApp:
         await self.send_queue.stop()
 
     def _lane_session(self, chat_id: int, lane: str) -> str:
-        """Отдельная тёплая сессия моста на лейн: 3 воркера не вытесняют друг друга."""
+        """Отдельная тёплая сессия моста на воркер: chat/track1/track2/media не вытесняют друг друга."""
         return f"tg_{chat_id}:{lane}"
 
     async def _typing_keepalive(self, chat_id: int, stop_event: asyncio.Event) -> None:
@@ -320,7 +405,7 @@ class FunnyBotApp:
         if chat.type == ChatType.PRIVATE:
             if user and user.id in self.bot_cfg.OWNER_IDS:
                 if text.strip().startswith("/start"):
-                    await message.answer("Смешнявка на связи. Алерты будут приходить сюда.")
+                    await message.answer("Дик на связи. Алерты будут приходить сюда.")
                 elif text.strip().startswith("/status"):
                     summary = self.gateway.get_key_status_summary()
                     await message.answer(f"Статус ключей: {json.dumps(summary, indent=2)}")
@@ -438,8 +523,9 @@ class FunnyBotApp:
                     )
                 return
 
-            # Роутинг на 3 воркера по типу вложения (с учётом реплая), ingress не ждёт.
+            # Роутинг по типу вложения (с учётом реплая), ingress не ждёт.
             # Быстрый sync-пик: если реплай на медиа — это media/track лейн, иначе chat.
+            # Сессия моста — по конкретному воркеру (track1/track2 не делят контекст).
             route_kind = media_kind
             if not route_kind and message.reply_to_message:
                 try:
@@ -447,13 +533,15 @@ class FunnyBotApp:
                 except Exception:
                     route_kind = None
             lane = route_lane(route_kind)
+            worker = self.lanes.get(lane)
+            session_tag = worker.name
             job = LaneJob(
                 lane=lane,
-                label=f"ping#{message.message_id}:{lane}",
-                coro_factory=lambda m=message, md=dict(msg_dict), mk=media_kind, fi=file_id, fu=file_unique_id, ln=lane, uid=user_id: self._process_ping(m, md, mk, fi, fu, lane=ln),
+                label=f"ping#{message.message_id}:{session_tag}",
+                coro_factory=lambda m=message, md=dict(msg_dict), mk=media_kind, fi=file_id, fu=file_unique_id, ln=lane, st=session_tag: self._process_ping(m, md, mk, fi, fu, lane=ln, session_tag=st),
                 enqueued_at=time.time(),
             )
-            await self.lanes.get(lane).submit(job)
+            await worker.submit(job)
             self.ping_detector.record_bot_reply(user_id)
             self.proactive.on_ping_reply_sent()
         else:
@@ -473,14 +561,66 @@ class FunnyBotApp:
                         )
                         await self.lanes.get(LANE_CHAT).submit(job)
 
-        # 10. Досье — строго фоном, горячий путь не ждёт (иначе каждый пинг +P2 вызов)
-        async def _dossier_bg(chat_id: int = chat.id, mid: int = message.message_id):
-            try:
-                await self.dossier_worker.process_window(chat_id, mid)
-            except Exception as e:
-                logger.warning("Background dossier failed: %s", e)
+        # 10. Досье — в sys-воркер фоном, горячий путь не ждёт
+        # (иначе каждый пинг плодит задачи и душит loop)
+        try:
+            await self.lanes.get(LANE_SYS).submit(LaneJob(
+                lane=LANE_SYS,
+                label=f"dossier#{message.message_id}",
+                coro_factory=lambda chat_id=chat.id, mid=message.message_id: self._dossier_bg(chat_id, mid),
+                enqueued_at=time.time(),
+            ))
+        except Exception as e:
+            logger.warning("Dossier submit failed: %s", e)
 
-        asyncio.create_task(_dossier_bg())
+        # 11. Живой банк стиля — сбор фразы сразу (дешёвые файловые операции),
+        # промоушн батча — в sys-воркер (там сетевой вызов фильтра).
+        # Чужих ботов не учим (иначе потащим чужие шаблоны), команды и медиа-стабы режет префильтр.
+        _from_bot = False
+        try:
+            _from_bot = bool(getattr(message.from_user, "is_bot", False))
+        except Exception:
+            pass
+        if user_id and not _from_bot and text and not media_kind:
+            async def _style_bg(
+                chat_id: int = chat.id,
+                uid: int = user_id,
+                t: str = text,
+                reply_to: Optional[int] = msg_dict.get("reply_to"),
+            ):
+                try:
+                    ctx = None
+                    if reply_to:
+                        try:
+                            target = await self.db.get_message(chat_id, reply_to)
+                            if target and (target.get("text") or "").strip():
+                                ctx = target["text"][:200]
+                        except Exception:
+                            ctx = None
+                    if await self.style_learner.collect_from_message(chat_id, uid, t, ctx=ctx):
+                        await self.lanes.get(LANE_SYS).submit(LaneJob(
+                            lane=LANE_SYS,
+                            label="style-promote",
+                            coro_factory=lambda: self._style_promote_bg(),
+                            enqueued_at=time.time(),
+                        ))
+                except Exception as e:
+                    logger.warning("Background style learn failed: %s", e)
+
+            asyncio.create_task(_style_bg())
+
+    async def _dossier_bg(self, chat_id: int, mid: int) -> None:
+        try:
+            await self.dossier_worker.process_window(chat_id, mid)
+        except Exception as e:
+            logger.warning("Background dossier failed: %s", e)
+
+    async def _style_promote_bg(self) -> None:
+        try:
+            if await self.style_learner.maybe_promote():
+                await self.style_learner.ensure_capacity()
+        except Exception as e:
+            logger.warning("Background style promote failed: %s", e)
 
     async def _handle_commands(self, message: types.Message, msg_dict: dict[str, Any]) -> bool:
         text = (msg_dict.get("text") or "").strip()
@@ -493,7 +633,7 @@ class FunnyBotApp:
             bridge_status = "✅ OK" if key_summary.get("bridge_status") == "ok" else "❌ DOWN"
             bridge_url = key_summary.get("bridge_url", self.bot_cfg.BRIDGE_URL)
             status_text = (
-                f"🤖 <b>Смешнявка</b>{shadow_tag}\n"
+                f"🤖 <b>Дик</b>{shadow_tag}\n"
                 f"Аптайм: {uptime_min:.1f} мин\n"
                 f"Модель: <code>{self.bot_cfg.MODEL_ID}</code>\n"
                 f"Мост Antigravity: {bridge_status} (<code>{bridge_url}</code>)\n"
@@ -504,20 +644,23 @@ class FunnyBotApp:
 
         elif text.startswith("/reset"):
             ok_any = False
-            for lane in (LANE_CHAT, LANE_TRACK, LANE_MEDIA):
+            for lane in (LANE_CHAT, f"{LANE_TRACK}1", f"{LANE_TRACK}2", LANE_MEDIA):
                 try:
                     if await self.gateway.reset_session(self._lane_session(message.chat.id, lane)):
                         ok_any = True
                 except Exception:
                     pass
-            # Совместимость со старой сессией без суффикса лейна
-            try:
-                if await self.gateway.reset_session(f"tg_{message.chat.id}"):
-                    ok_any = True
-            except Exception:
-                pass
+            # Совместимость со старыми сессиями без суффикса лейна
+            for legacy in (LANE_TRACK, f"tg_{message.chat.id}"):
+                try:
+                    if await self.gateway.reset_session(
+                        legacy if legacy.startswith("tg_") else self._lane_session(message.chat.id, legacy)
+                    ):
+                        ok_any = True
+                except Exception:
+                    pass
             if ok_any:
-                await message.reply("Сессии контекста диалога на мосту Antigravity сброшены (chat/track/media).")
+                await message.reply("Сессии контекста диалога на мосту Antigravity сброшены (chat/track1/track2/media).")
             else:
                 await message.reply("Сессии не найдены или уже были очищены.")
             return True
@@ -706,6 +849,7 @@ class FunnyBotApp:
         file_id: Optional[str],
         file_unique_id: Optional[str],
         lane: str = LANE_CHAT,
+        session_tag: Optional[str] = None,
     ) -> None:
         """Воркер-обработчик пинга. Живой флоу: typing всё время + контекст, а не дефолт-оценка."""
         chat_id = message.chat.id
@@ -714,7 +858,7 @@ class FunnyBotApp:
         typing_task = asyncio.create_task(self._typing_keepalive(chat_id, stop_typing))
         try:
             return await self._process_ping_inner(
-                message, msg_dict, media_kind, file_id, file_unique_id, lane
+                message, msg_dict, media_kind, file_id, file_unique_id, lane, session_tag
             )
         finally:
             stop_typing.set()
@@ -732,6 +876,7 @@ class FunnyBotApp:
         file_id: Optional[str],
         file_unique_id: Optional[str],
         lane: str = LANE_CHAT,
+        session_tag: Optional[str] = None,
     ) -> None:
         chat_id = message.chat.id
         media_cache_item = None
@@ -782,7 +927,14 @@ class FunnyBotApp:
             lane = LANE_TRACK
         elif target_kind:
             lane = LANE_MEDIA if lane == LANE_CHAT and target_kind != "audio" else lane
-        session_id = self._lane_session(chat_id, lane)
+        # Сессия — по конкретному воркеру (track1/track2 не делят контекст).
+        # Если лейн уточнился уже внутри воркера — fallback на общую сессию лейна.
+        tag = session_tag or lane
+        if lane == LANE_TRACK and not tag.startswith(LANE_TRACK):
+            tag = LANE_TRACK
+        elif lane != LANE_TRACK and tag != lane and tag not in (LANE_CHAT, LANE_MEDIA):
+            tag = lane
+        session_id = self._lane_session(chat_id, tag)
         media_lane = "track" if (target_kind == "audio") else ("media" if target_kind else lane)
 
         # 2. Медиа и история — параллельно: пока качается файл, уже читаем контекст
@@ -795,7 +947,8 @@ class FunnyBotApp:
         _mentions = (f"@{self.bot_username}".lower() in t_low) if getattr(self, "bot_username", "") else False
         if not _mentions:
             for _a in (self.bot_cfg.BOT_ALIASES or []):
-                if _a and _a.lower() in t_low:
+                # по границам слова: «дик» внутри «дикий» — не упоминание
+                if _a and re.search(r"(?<!\w)" + re.escape(_a.lower()) + r"(?!\w)", t_low):
                     _mentions = True
                     break
         provoked = ProvocationDetector.is_provoked(
@@ -839,8 +992,8 @@ class FunnyBotApp:
             return None
 
         async def _load_hint():
-            if not want_decide:
-                return []
+            # Хинт грузим всегда: он нужен и ресёрчу, и детектору настроения.
+            # Локальный SQLite — дёшево, на латентность не влияет.
             try:
                 return await self.db.get_last_messages(chat_id, limit=10)
             except Exception:
@@ -887,7 +1040,9 @@ class FunnyBotApp:
                 "text": ttext or "",
             }
 
-        # 3. Research: быстрый гейт в коде + LLM только формулирует query
+        # 3. Research: на любое медиа — ВСЕГДА (детерминированный запрос
+        # из разбора, без LLM-гейта: модель подцепит факты через search_web).
+        # На текст — как раньше: быстрый гейт в коде + LLM формулирует query.
         need_search = False
         safe_query = None
         sources_text = None
@@ -907,7 +1062,37 @@ class FunnyBotApp:
             if parts:
                 media_ctx = f"[{' | '.join(parts)}]"
 
-        if want_decide:
+        if media_cache_item:
+            history_lines = [f"{m.get('nick', 'User')}: {m.get('text', '')}" for m in hint_msgs if m.get("text")]
+            known_nicks = [m.get("nick") for m in hint_msgs if m.get("nick")]
+            safe_query = build_media_search_query(
+                media_cache_item,
+                caption=target_caption,
+                user_text=text,
+                known_nicks=known_nicks,
+                bot_aliases=self.bot_cfg.BOT_ALIASES,
+            )
+            if safe_query:
+                need_search = True
+            else:
+                # из разбора совсем нечего взять — пусть LLM попробует
+                history_str = "\n".join(history_lines)
+                need_search, safe_query = await self.research.decide_search(
+                    history_text=history_str,
+                    current_text=text,
+                    known_nicks=known_nicks,
+                    extra_context=media_ctx,
+                )
+                if not need_search:
+                    # последний шанс: поиск по подписи/тексту как есть
+                    fallback = build_media_search_query(
+                        {"kind": target_kind, "summary": text or target_caption or ""},
+                        caption=None, user_text=None,
+                        known_nicks=known_nicks, bot_aliases=self.bot_cfg.BOT_ALIASES,
+                    )
+                    if fallback:
+                        need_search, safe_query = True, fallback
+        elif want_decide:
             history_lines = [f"{m.get('nick', 'User')}: {m.get('text', '')}" for m in hint_msgs if m.get("text")]
             history_str = "\n".join(history_lines)
             known_nicks = [m.get("nick") for m in hint_msgs if m.get("nick")]
@@ -918,6 +1103,13 @@ class FunnyBotApp:
                 known_nicks=known_nicks,
                 extra_context=media_ctx,
             )
+
+        # Настроение чата: serious — отвечают по делу, banter — угар.
+        # Дешёвая эвристика по тексту пинга и последним сообщениям.
+        mood = detect_mood(
+            text,
+            [m.get("text", "") for m in hint_msgs if m.get("text")],
+        )
 
         # Do NOT inject fake sources_text. The model autonomously runs search_web with search_query.
 
@@ -965,6 +1157,8 @@ class FunnyBotApp:
             request_attrs += f' reply_target="{reply_snapshot.get("alias")}"'
         # Явный флаг для промпта: провокация в адрес бота → режим жёсткого отпора
         request_attrs += f' provoked="{"true" if provoked else "false"}"'
+        # Настроение чата: serious — по делу без роаста, banter — угар
+        request_attrs += f' mood="{mood}"'
 
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
@@ -980,6 +1174,20 @@ class FunnyBotApp:
         # При провокации второй провал гарда не должен давать вялую отмазку —
         # лучше первый валидный (пусть длинноватый) кандидат, чем «башка не варит»
         provoked_fallback: Optional[str] = None
+        # Анти-гиперфикс: свои последние реплики — кандидат не должен их повторять
+        recent_bot_texts: list[str] = []
+        try:
+            last_all = await self.db.get_last_messages(chat_id, limit=30)
+            bot_uid = self.bot_id
+            for m in reversed(last_all):
+                if m.get("is_bot") or (bot_uid and m.get("user_id") == bot_uid):
+                    t = (m.get("text") or "").strip()
+                    if t:
+                        recent_bot_texts.append(t)
+                    if len(recent_bot_texts) >= 3:
+                        break
+        except Exception:
+            recent_bot_texts = []
 
         # Outgoing guard: leak/bad parse/forbidden N/100 на фото → 1 repair, сырое не шлём
         for attempt in range(2):
@@ -1033,7 +1241,7 @@ class FunnyBotApp:
                 if attempt == 0:
                     continue
                 candidate_text = SCORE_PATTERN.sub("", candidate_text).strip()
-            # Провокация: отпор обязан быть коротким и рубленым — длинноту в repair
+            # Провокация: отпор обязан быть гиперкратким — длинноту/вопросы в repair
             if provoked and not is_media_mode and not ProvocationDetector.provoked_reply_ok(candidate_text):
                 logger.warning(
                     "Outgoing guard: provoked reply too soft/long on attempt %d/2 (text: %.80s)",
@@ -1044,6 +1252,23 @@ class FunnyBotApp:
                 if attempt == 0:
                     continue
                 candidate_text = provoked_fallback
+            # Анти-склейка: короткий ответ из двух мыслей через запятую — в repair.
+            # Длинные ответы по запросу (объяснения) не трогаем.
+            if not provoked and not is_media_mode and has_comma_glue(candidate_text):
+                logger.warning(
+                    "Outgoing guard: comma-glued reply on attempt %d/2 (text: %.80s)",
+                    attempt + 1, candidate_text,
+                )
+                if attempt == 0:
+                    continue
+            # Анти-гиперфикс: повтор своего же недавнего панча — в repair
+            if not provoked and is_repetitive(candidate_text, recent_bot_texts):
+                logger.warning(
+                    "Outgoing guard: repetitive reply on attempt %d/2 (text: %.80s)",
+                    attempt + 1, candidate_text,
+                )
+                if attempt == 0:
+                    continue
             reply_raw = candidate_text
             break
 
@@ -1109,11 +1334,12 @@ class FunnyBotApp:
         from src.gateway.schemas import ProactiveDecision
 
         force_val = self.proactive.should_force_proactive()
+        mood = detect_mood(msg_dict.get("text") or "")
         system_instruction, contents = await self.assembler.assemble(
             chat_id=chat_id,
             current_msg=msg_dict,
             mode="proactive",
-            request_attrs=f'force="{"true" if force_val else "false"}"'
+            request_attrs=f'force="{"true" if force_val else "false"}" mood="{mood}"'
         )
 
         decision: Optional[ProactiveDecision] = await self.gateway.generate(
@@ -1134,6 +1360,11 @@ class FunnyBotApp:
             # Check outgoing leak guard on proactive reply as well
             if has_persona_leak(decision.reply, is_media=False):
                 logger.warning("Outgoing guard: proactive reply contained leak, dropping.")
+                self.proactive.on_proactive_skipped()
+                return
+            # Анти-склейка через запятую — тоже пропуск, а не вялая склейка
+            if has_comma_glue(decision.reply):
+                logger.warning("Outgoing guard: proactive reply comma-glued, dropping.")
                 self.proactive.on_proactive_skipped()
                 return
 

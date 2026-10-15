@@ -14,7 +14,8 @@ services:
       - ./reports:/app/reports
       - ./backups:/app/backups
       - ./config:/app/config:ro
-      - ./prompts:/app/prompts:ro
+      # prompts/ на запись: живой банк стиля (style_examples*.yaml) дописывается ботом на лету
+      - ./prompts:/app/prompts:rw
       - ./src:/app/src:ro
     healthcheck:
       test: ["CMD", "python", "-m", "src.tools.healthcheck"]

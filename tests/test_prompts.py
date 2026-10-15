@@ -7,8 +7,8 @@ def test_all_prompt_files_exist():
     builder = PromptBuilder("prompts")
     modes = ["ping", "proactive", "media_reply", "who", "research"]
     for m in modes:
-        res = builder.build_system_instruction(m, bot_name="Смешнявка", now_str="2026-10-13 12:00")
-        assert "Смешнявка" in res
+        res = builder.build_system_instruction(m, bot_name="Дик", now_str="2026-10-13 12:00")
+        assert "Дик" in res
         assert "2026-10-13 12:00" in res
 
     modulars = [
@@ -23,7 +23,7 @@ def test_all_prompt_files_exist():
     for mod in modulars:
         res = builder.build_system_instruction(
             mod,
-            bot_name="Смешнявка",
+            bot_name="Дик",
             now_str="2026-10-13 12:00",
             summary_tok=800,
             chunk_summary_tok=300
@@ -40,7 +40,7 @@ def test_golden_placeholder_isolation():
     ]
     res = builder.build_system_instruction(
         "ping",
-        bot_name="Смешнявка",
+        bot_name="Дик",
         now_str="2026-10-13 12:00",
         style_examples=malicious_examples
     )

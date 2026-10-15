@@ -39,7 +39,7 @@ class AlertManager:
         if not force and not self.should_alert(event_type):
             return
 
-        formatted = f"⚠️ [Смешнявка Алерт] <b>{event_type}</b>\n\n{message}"
+        formatted = f"⚠️ [Дик Алерт] <b>{event_type}</b>\n\n{message}"
         for owner_id in self.owner_ids:
             try:
                 await self.sender.send_message(

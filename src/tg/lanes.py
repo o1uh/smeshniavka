@@ -1,16 +1,18 @@
-"""Three-lane worker pool: chat / track / media.
+"""Lane worker pool: chat / track x2 / media / sys.
 
 Зачем: один медленный разбор гифки/видео не должен тормозить обычное
-общение. Каждый лейн — отдельная FIFO-очередь с одним consumer'ом,
-поэтому:
+общение. Каждый лейн — отдельная FIFO-очередь:
 - chat  — дефолтное общение (текст, proactive, who),
-- track — только музыкальные треки (audio),
-- media — все остальные медиа (photo/video/voice/video_note/animation/sticker).
+- track — только музыкальные треки (audio), ДВА воркера (треки идут
+  пачками, один consumer захлебывается),
+- media — все остальные медиа (photo/video/voice/video_note/animation/sticker),
+- sys   — фон (досье, обучение банка стиля, чистки).
 
 Переполнение: выкидываем самое старое, но никогда не дропаем текущий
 обрабатываемый элемент. Бэкпрешер виден через qsize() в логах.
 """
 import asyncio
+import itertools
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
@@ -19,8 +21,9 @@ from src.ops.log import logger
 LANE_CHAT = "chat"
 LANE_TRACK = "track"
 LANE_MEDIA = "media"
+LANE_SYS = "sys"
 
-ALL_LANES = (LANE_CHAT, LANE_TRACK, LANE_MEDIA)
+ALL_LANES = (LANE_CHAT, LANE_TRACK, LANE_MEDIA, LANE_SYS)
 
 # audio — отдельный лейн, всё остальное с файлом — media.
 TRACK_KINDS = {"audio"}
@@ -110,32 +113,51 @@ class LaneWorker:
 
 @dataclass
 class LanePool:
-    """Три воркера: chat / track / media."""
+    """Воркеры: chat / track x2 / media / sys."""
 
     chat: LaneWorker = field(default_factory=lambda: LaneWorker(LANE_CHAT))
-    track: LaneWorker = field(default_factory=lambda: LaneWorker(LANE_TRACK))
+    track: LaneWorker = field(default_factory=lambda: LaneWorker(f"{LANE_TRACK}1"))
+    track2: LaneWorker = field(default_factory=lambda: LaneWorker(f"{LANE_TRACK}2"))
     media: LaneWorker = field(default_factory=lambda: LaneWorker(LANE_MEDIA))
+    sys: LaneWorker = field(default_factory=lambda: LaneWorker(LANE_SYS))
+
+    # round-robin по трековым воркерам (итeрируется только при submit)
+    _track_cycle: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._track_cycle = itertools.cycle((self.track, self.track2))
+
+    def _next_track(self) -> LaneWorker:
+        assert self._track_cycle is not None
+        return next(self._track_cycle)
 
     def start_all(self) -> None:
         self.chat.start()
         self.track.start()
+        self.track2.start()
         self.media.start()
+        self.sys.start()
 
     async def stop_all(self) -> None:
         await self.chat.stop()
         await self.track.stop()
+        await self.track2.stop()
         await self.media.stop()
+        await self.sys.stop()
 
     def get(self, lane: str) -> LaneWorker:
         if lane == LANE_TRACK:
-            return self.track
+            return self._next_track()
         if lane == LANE_MEDIA:
             return self.media
+        if lane == LANE_SYS:
+            return self.sys
         return self.chat
 
     def sizes(self) -> dict[str, Any]:
         return {
             LANE_CHAT: self.chat.qsize(),
-            LANE_TRACK: self.track.qsize(),
+            LANE_TRACK: self.track.qsize() + self.track2.qsize(),
             LANE_MEDIA: self.media.qsize(),
+            LANE_SYS: self.sys.qsize(),
         }

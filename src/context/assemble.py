@@ -62,10 +62,12 @@ def _alias_map_from_messages(msgs: list[dict[str, Any]]) -> dict[Any, tuple[str,
     return m
 
 
-def format_dossier_slice(dossier_dict: dict[str, Any], max_tokens: int = 300) -> str:
+def format_dossier_slice(dossier_dict: dict[str, Any], max_tokens: int = 300, seed: int = 0) -> str:
     """
     Formats up to max_tokens of dossier: top stable by count/recency + latest recent.
     Format: [u3 «ник»] interests: stable: ...; recent: ...
+    seed ротирует окно (анти-гиперфикс): соседние запросы видят разные факты,
+    модель не пережёвывает один и тот же топ каждый раз.
     """
     raw_json = dossier_dict.get("dossier_data", "{}")
     alias = dossier_dict.get("alias", f"u{dossier_dict.get('user_id')}")
@@ -76,14 +78,21 @@ def format_dossier_slice(dossier_dict: dict[str, Any], max_tokens: int = 300) ->
     except Exception:
         return f"[{alias} «{nick}»]"
 
+    def _rot(items: list, n: int = 3) -> list:
+        items = [it for it in items if it.get("text")]
+        if not items or len(items) <= n:
+            return items
+        off = seed % len(items)
+        return [items[(off + i) % len(items)] for i in range(n)]
+
     field_parts = []
     for field_name in ["interests", "manner", "music_taste", "relations", "triggers", "facts"]:
         field_data = data.get(field_name, {})
         stable = field_data.get("stable", [])
         recent = field_data.get("recent", [])
 
-        st_texts = [f"{item.get('text')} (подтверждено)" for item in stable[:3] if item.get("text")]
-        rc_texts = [f"{item.get('text')} (недавнее)" for item in recent[:3] if item.get("text")]
+        st_texts = [f"{item.get('text')} (подтверждено)" for item in _rot(stable) if item.get("text")]
+        rc_texts = [f"{item.get('text')} (недавнее)" for item in _rot(recent) if item.get("text")]
 
         all_entries = []
         if st_texts:
@@ -127,11 +136,12 @@ class ContextAssembler:
         # 1. Build System Instruction
         system_instruction = self.prompts.build_system_instruction(
             mode_or_modular=mode,
-            bot_name="Смешнявка",
+            bot_name="Дик",
             now_str=now_str,
             style_examples=style_examples,
             summary_tok=self.bot_config.SUMMARY_TOK,
-            chunk_summary_tok=self.bot_config.CHUNK_SUMMARY_TOK
+            chunk_summary_tok=self.bot_config.CHUNK_SUMMARY_TOK,
+            style_examples_n=self.bot_config.STYLE_EXAMPLES_N,
         )
 
         # 2. Summary
@@ -192,10 +202,12 @@ class ContextAssembler:
                     selected_user_ids.append(uid)
 
         dossier_lines = []
+        # seed ротации — id текущего сообщения: соседние запросы видят разные факты
+        rot_seed = int(current_msg.get("message_id") or 0)
         for uid in selected_user_ids:
             d_row = await self.db.get_dossier(chat_id, uid)
             if d_row:
-                line = format_dossier_slice(d_row)
+                line = format_dossier_slice(d_row, seed=rot_seed + (uid or 0))
                 dossier_lines.append(line)
         dossiers_block = "\n".join(dossier_lines) if dossier_lines else None
 

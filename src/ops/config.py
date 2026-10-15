@@ -56,27 +56,30 @@ class BotConfig(BaseModel):
     MODEL_ID: str = "fast"
     BRIDGE_URL: str = "http://127.0.0.1:8000"
     TZ: str = "Asia/Novosibirsk"
-    BOT_ALIASES: list[str] = Field(default_factory=lambda: ["смешняв", "смешнявка"])
+    BOT_ALIASES: list[str] = Field(default_factory=lambda: ["дик", "дика", "дику", "диком", "дике"])
     SAFETY: str = "all OFF"
     PII_SCRUB: bool = True
     LOG_CONTENT: bool = False
 
     # Concurrency & priorities
-    MAX_CONCURRENT: int = 4
+    MAX_CONCURRENT: int = 6
     RPM_P0_RESERVE: int = 5
     BUDGET_P2_MAX: int = 70
     BUDGET_P1_MAX: int = 90
 
-    # Lane workers: chat (default talk) / track (audio) / media (rest).
+    # Lane workers: chat (default talk) / track x2 (audio) / media (rest) / sys (bg).
     # Sum should stay <= MAX_CONCURRENT so one slow gif can't eat the chat.
-    CHAT_MAX_CONCURRENT: int = 2
-    TRACK_MAX_CONCURRENT: int = 1
+    CHAT_MAX_CONCURRENT: int = 1
+    TRACK_MAX_CONCURRENT: int = 2
     MEDIA_MAX_CONCURRENT: int = 1
+    # System lane: background P2 (dossier, style_filter) — не душит юзерскую медийку
+    SYS_MAX_CONCURRENT: int = 1
     WORKER_QUEUE_MAX: int = 30
     # Per-lane bridge timeouts (chat is latency-critical, media may be slow)
     CHAT_TIMEOUT_S: float = 35.0
     TRACK_TIMEOUT_S: float = 50.0
     MEDIA_TIMEOUT_S: float = 75.0
+    SYS_TIMEOUT_S: float = 75.0
     # Human-like typing keepalive during long generations
     TYPING_KEEPALIVE_S: float = 4.0
     # Media preprocessing before base64 upload to the bridge
@@ -119,11 +122,11 @@ class BotConfig(BaseModel):
     MEDIA_AUTO_REACT_ANIMATION_P: float = 0.03
 
     # Context & history
-    CTX_LAST: int = 60
-    SUMMARY_TOK: int = 800
+    CTX_LAST: int = 100
+    SUMMARY_TOK: int = 1000
     CHUNK_SUMMARY_TOK: int = 300
     THREAD_CHAIN_DEPTH: int = 3
-    THREAD_NEIGHBORS: int = 10
+    THREAD_NEIGHBORS: int = 12
 
     # Dossier
     DOSSIER_EVERY: int = 40
@@ -134,10 +137,23 @@ class BotConfig(BaseModel):
     DOSSIER_SLICES_MAX: int = 5
     STYLE_EXAMPLES_N: int = 8
     STYLE_FILTER_BATCH: int = 30
+    # Живой банк стиля (дообучения модели нет — только few-shot примеры)
+    STYLE_LEARN_ENABLED: bool = True
+    STYLE_MIN_LEN: int = 6
+    STYLE_MAX_LEN: int = 150
+    STYLE_EXAMPLES_MAX: int = 128
+    # Пермач банка стиля (не вытесняется): дефолт «бум», правится на RPi/конфигом
+    STYLE_PINNED_SEEDS: list[str] = Field(default_factory=lambda: ["бум"])
 
     # Research
     SEARCH_FORCE_TRIGGERS: list[str] = Field(
         default_factory=lambda: ["загугли", "погугли", "ресерч", "пруф", "чекни"]
+    )
+    # Смеяки как сигнал качества для банка стиля:
+    # 3+ distinct — сразу в банк-пермач, 1–2 — в очередь на отбор
+    REACT_LAUGH_THRESHOLD: int = 3
+    REACT_LAUGH_EMOJIS: list[str] = Field(
+        default_factory=lambda: ["😁", "😂", "🤣", "😆", "😹", "🤭"]
     )
     LINK_TRIGGERS: list[str] = Field(
         default_factory=lambda: ["что за", "о чём", "пруф", "суть"]

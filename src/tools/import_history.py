@@ -137,7 +137,7 @@ async def run_summary_and_dossier_import(
         )
         system_instruction = prompt_builder.build_system_instruction(
             mode_or_modular="summary_chunk",
-            bot_name="Смешнявка"
+            bot_name="Дик"
         )
 
         res: Optional[SummaryOut] = await gateway.generate(
@@ -160,7 +160,7 @@ async def run_summary_and_dossier_import(
         )
         system_instruction = prompt_builder.build_system_instruction(
             mode_or_modular="summary_merge",
-            bot_name="Смешнявка"
+            bot_name="Дик"
         )
         merged: Optional[SummaryOut] = await gateway.generate(
             prompt_name="summary_merge",

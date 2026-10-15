@@ -44,12 +44,17 @@ class PingDetector:
         if f"@{self.bot_username}" in text:
             return True
 
-        # 3. Alias match (word starting with alias)
+        # 3. Alias match. Короткие алиасы (<=4 символов: дик, дика...)
+        # только точным совпадением слова — иначе «дикий»/«дикарь» дадут ложный пинг.
+        # Длинные — префиксом (покрывает падежи и растягивания).
         words = text.split()
         for w in words:
             clean_w = "".join(c for c in w if c.isalnum() or c in ("-", "_"))
             for alias in self.aliases:
-                if clean_w.startswith(alias):
+                if len(alias) <= 4:
+                    if clean_w == alias:
+                        return True
+                elif clean_w.startswith(alias):
                     return True
 
         # 4. Follow-up: только reply на сообщение бота в окне (R1):
@@ -129,6 +134,9 @@ class TgSendQueue:
         self._lock = asyncio.Lock()
         self._worker_task: Optional[asyncio.Task] = None
         self._running = False
+        # Колбэк (chat_id, message_id, full_text, reply_to) после успешной отправки:
+        # бот пишет свои исходящие в БД (контекст + прайм по смеякам), best-effort
+        self.on_sent = None
 
     def start(self) -> None:
         if not self._running:
@@ -208,8 +216,9 @@ class TgSendQueue:
                 reply_id = item["reply_to"] if idx == 0 else None
                 sanitized_html = sanitize_telegram_html(chunk)
 
+                sent_id = None
                 try:
-                    await self.sender.send_message(
+                    sent_id = await self.sender.send_message(
                         chat_id=item["chat_id"],
                         text=sanitized_html,
                         reply_to_message_id=reply_id,
@@ -221,7 +230,7 @@ class TgSendQueue:
                         logger.warning("Telegram HTML parse error, retrying plain text: %s", e)
                         plain = strip_all_tags(chunk)
                         try:
-                            await self.sender.send_message(
+                            sent_id = await self.sender.send_message(
                                 chat_id=item["chat_id"],
                                 text=plain,
                                 reply_to_message_id=reply_id,
@@ -231,3 +240,9 @@ class TgSendQueue:
                             logger.error("Failed sending plain text fallback: %s", retry_err)
                     else:
                         logger.error("Error sending TG message: %s", e)
+
+                if idx == 0 and sent_id is not None and self.on_sent is not None:
+                    try:
+                        await self.on_sent(item["chat_id"], sent_id, item["text"], item["reply_to"])
+                    except Exception as cb_err:
+                        logger.warning("Send queue on_sent callback failed: %s", cb_err)

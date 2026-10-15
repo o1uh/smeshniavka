@@ -50,11 +50,12 @@ class PromptBuilder:
     def build_system_instruction(
         self,
         mode_or_modular: str,
-        bot_name: str = "Смешнявка",
+        bot_name: str = "Дик",
         now_str: str = "",
         style_examples: Optional[list[str]] = None,
         summary_tok: int = 800,
         chunk_summary_tok: int = 300,
+        style_examples_n: Optional[int] = None,
     ) -> str:
         """
         Builds system instruction according to TB-15:
@@ -85,15 +86,37 @@ class PromptBuilder:
                 try:
                     import yaml
                     data = yaml.safe_load(style_yaml_path.read_text(encoding="utf-8"))
-                    if isinstance(data, dict) and "examples" in data and isinstance(data["examples"], list):
-                        style_examples = data["examples"]
+                    if isinstance(data, dict):
+                        # Взвешенная подвыборка: прайм (хиты по смеякам) первым,
+                        # потом свежие. Пермач — всегда в пуле. Отложенный импорт:
+                        # learner тянет assemble, прямого импорта сверху нельзя.
+                        try:
+                            from src.style.learner import sample_for_prompt, norm_entry
+                            raw_bank = data.get("examples") or []
+                            bank = [e for e in (norm_entry(r) for r in raw_bank) if e]
+                            pinned = [p for p in (data.get("pinned") or []) if isinstance(p, str)]
+                            style_examples = sample_for_prompt(
+                                bank, pinned, style_examples_n or len(bank) or 8,
+                            )
+                        except ImportError:
+                            bank = [e for e in (data.get("examples") or []) if isinstance(e, str)]
+                            # Пермач (pinned) — всегда в пуле сэмплинга
+                            bank += [p for p in (data.get("pinned") or []) if isinstance(p, str) and p not in bank]
+                            style_examples = bank or None
                 except Exception:
                     pass
 
         formatted_examples = ""
         if style_examples:
+            # Живой банк: каждый вызов — случайная подвыборка N (разнообразие),
+            # иначе застывшие сиды дают застывшие ответы
+            picks = list(style_examples)
+            if style_examples_n and len(picks) > style_examples_n:
+                import random as _random
+
+                picks = _random.sample(picks, style_examples_n)
             escaped_examples = []
-            for ex in style_examples:
+            for ex in picks:
                 safe_ex = str(ex).replace("<<", "&lt;&lt;").replace(">>", "&gt;&gt;")
                 escaped_examples.append(f"- {safe_ex}")
             formatted_examples = "\n".join(escaped_examples)
