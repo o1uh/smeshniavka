@@ -81,6 +81,14 @@ def _write_active(tmp_path, examples):
     )
 
 
+def _texts(active_list):
+    """Тексты entry независимо от формата (строка или dict)."""
+    out = []
+    for e in active_list:
+        out.append(e["text"] if isinstance(e, dict) else e)
+    return out
+
+
 @pytest.mark.asyncio
 async def test_overflow_evicts_weakest_not_oldest(tmp_path):
     _write_active(tmp_path, ["сильный старый хит", "слабый мусор", "свежий хит"])
@@ -89,8 +97,8 @@ async def test_overflow_evicts_weakest_not_oldest(tmp_path):
     # переполнение 3 > 2: слабый вылетает, сильный старый остаётся
     await learner._apply_weakest_eviction(["сильный старый хит", "слабый мусор", "свежий хит"], 2)
     active = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))["examples"]
-    assert "слабый мусор" not in active
-    assert "сильный старый хит" in active
+    assert "слабый мусор" not in _texts(active)
+    assert "сильный старый хит" in _texts(active)
     assert len(active) == 2
 
 
@@ -100,7 +108,7 @@ async def test_eviction_fifo_fallback_on_filter_fail(tmp_path):
     learner = _learner(tmp_path, FakeGateway(fail=True), max_active=2, batch=10)
     await learner._apply_weakest_eviction(["первый", "второй", "третий"], 2)
     active = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))["examples"]
-    assert active == ["второй", "третий"]
+    assert _texts(active) == ["второй", "третий"]
 
 
 @pytest.mark.asyncio
@@ -119,7 +127,7 @@ async def test_reacted_direct_to_bank_evictable(tmp_path):
     learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=30)
     assert await learner.collect_reacted(1, 7, "бум еблан", direct=True) is True
     data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
-    assert "бум еблан" in (data.get("examples") or [])
+    assert "бум еблан" in _texts(data.get("examples") or [])
     assert "бум еблан" not in (data.get("pinned") or [])
     # повтор — уже в банке
     assert await learner.collect_reacted(1, 7, "бум еблан", direct=True) is False
@@ -127,7 +135,7 @@ async def test_reacted_direct_to_bank_evictable(tmp_path):
     learner.gateway = FakeGateway(ok_map={"e0": True, "e1": False})
     await learner._apply_weakest_eviction(["бум", "бум еблан"], 2)
     data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
-    assert "бум еблан" not in (data.get("examples") or [])
+    assert "бум еблан" not in _texts(data.get("examples") or [])
     assert "бум" in (data.get("pinned") or [])  # пермач-сид на месте
 
 
@@ -144,7 +152,7 @@ async def test_pinned_seeds_and_eviction_keeps_pinned(tmp_path):
     data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
     # фильтр лёг → FIFO по examples, но сид пермача уже в файле
     assert "бум" in (data.get("pinned") or [])
-    assert data["examples"] == ["второй", "третий"]
+    assert _texts(data["examples"]) == ["второй", "третий"]
 
 
 @pytest.mark.asyncio

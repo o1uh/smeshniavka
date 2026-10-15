@@ -50,7 +50,8 @@ async def test_lane_pool_isolation():
     """Треки и медиа не блокируют друг друга: разные очереди/consumer'ы."""
     pool = LanePool(
         chat=LaneWorker("chat", max_queue=10),
-        track=LaneWorker("track", max_queue=10),
+        track=LaneWorker("track1", max_queue=10),
+        track2=LaneWorker("track2", max_queue=10),
         media=LaneWorker("media", max_queue=10),
     )
     pool.start_all()
@@ -67,6 +68,26 @@ async def test_lane_pool_isolation():
     await asyncio.sleep(0.3)
     await pool.stop_all()
     assert sorted(done) == ["chat", "media", "track"]
+
+
+@pytest.mark.asyncio
+async def test_track_round_robin_two_workers():
+    """Два трековых воркера делят очередь: треки идут пачками, не в один consumer."""
+    from src.tg.lanes import LANE_SYS
+    pool = LanePool(
+        chat=LaneWorker("chat", max_queue=10),
+        track=LaneWorker("track1", max_queue=10),
+        track2=LaneWorker("track2", max_queue=10),
+        media=LaneWorker("media", max_queue=10),
+        sys=LaneWorker("sys", max_queue=10),
+    )
+    w1 = pool.get(LANE_TRACK)
+    w2 = pool.get(LANE_TRACK)
+    w3 = pool.get(LANE_TRACK)
+    assert {w1.name, w2.name} == {"track1", "track2"}
+    assert w3.name == w1.name  # round-robin по кругу
+    assert pool.get(LANE_SYS).name == "sys"
+    assert set(pool.sizes().keys()) == {"chat", "track", "media", "sys"}
 
 
 def _cfg() -> AppConfig:
@@ -90,3 +111,12 @@ def test_gateway_lane_mapping():
     assert gw.lane_for_prompt("media_analyze", lane="track") == "track"
     assert gw.lane_for_prompt("persona_media_reply", lane="track") == "track"
     assert gw.lane_for_prompt("persona_ping", lane="sys") == "sys"
+
+
+def test_gateway_track_two_slots():
+    """Трековый лейн держит 2 параллельных трека (2 воркера)."""
+    cfg = _cfg()
+    gw = AntigravityGateway(cfg)
+    assert gw.track_max == 2
+    assert gw.chat_max == 1
+    assert gw._lane_limit("track") == 2

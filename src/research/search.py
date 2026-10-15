@@ -33,7 +33,7 @@ def anonymize_query(
             if nick and len(nick) >= 3:
                 clean = re.sub(re.escape(nick), "", clean, flags=re.IGNORECASE)
 
-    aliases = list(bot_aliases or []) + ["смешнявка", "смешняв", "смешнявки", "смешнявке", "смешнявку"]
+    aliases = list(bot_aliases or []) + ["смешнявка", "смешняв", "смешнявки", "смешнявке", "смешнявку", "дик", "дика", "дику"]
     for alias in aliases:
         if alias and len(alias) >= 3:
             clean = re.sub(re.escape(alias), "", clean, flags=re.IGNORECASE)
@@ -43,6 +43,74 @@ def anonymize_query(
     if len(clean) < 3:
         return None
     return clean
+
+
+def build_media_search_query(
+    media_cache_item: Optional[dict[str, Any]],
+    caption: Optional[str] = None,
+    user_text: Optional[str] = None,
+    known_nicks: Optional[list[str]] = None,
+    bot_aliases: Optional[list[str]] = None,
+) -> Optional[str]:
+    """Детерминированный поисковый запрос из разбора медиа (без LLM).
+
+    Всегда даёт запрос, когда есть медиа: трек — по исполнителю/названию,
+    картинка/мем — по тексту на ней и сути, видео — по сути кадра.
+    Возвращает уже обезличенный запрос или None, если совсем не из чего.
+    """
+    import json as _json
+
+    if not media_cache_item:
+        return None
+    kind = media_cache_item.get("kind")
+
+    # 1. Трек: исполнитель + название — лучший запрос
+    track_meta = media_cache_item.get("track_meta")
+    if isinstance(track_meta, str):
+        try:
+            track_meta = _json.loads(track_meta)
+        except Exception:
+            track_meta = None
+    if kind == "audio" and isinstance(track_meta, dict):
+        artist = (track_meta.get("artist") or "").strip()
+        title = (track_meta.get("title") or "").strip()
+        if artist or title:
+            q = f"{artist} {title}".strip()
+            return anonymize_query(q, known_nicks, bot_aliases) or q
+
+    # 2. Текст на картинке/меме — цепляемся за сущности
+    ocr = (media_cache_item.get("ocr_text") or "").strip()
+    if ocr:
+        # берём первые осмысленные слова (не мусор), максимум 8
+        words = [w for w in re.split(r"\s+", ocr) if len(w) >= 3][:8]
+        if words:
+            q = " ".join(words)
+            safe = anonymize_query(q, known_nicks, bot_aliases)
+            if safe:
+                return safe
+
+    # 3. Суть разбора + подпись + текст запроса
+    bits: list[str] = []
+    summary = (media_cache_item.get("summary") or "").strip()
+    if summary:
+        bits.append(summary[:120])
+    if caption and caption.strip():
+        bits.append(caption.strip()[:80])
+    if user_text and user_text.strip():
+        # из текста юзера — только если там вопрос про мем/событие
+        t_low = user_text.lower().replace("ё", "е")
+        if any(k in t_low for k in ("мем", "прикол", "причем", "при чем", "что за", "че за", "поясни", "кто такой", "что такое")):
+            bits.append(user_text.strip()[:80])
+    if bits:
+        q = " ".join(bits)
+        # выкидываем слова-мусор про сам мем
+        q = re.sub(r"(?i)\b(мем|мема|меме|кроссовер|картинка|фото|видос|видео|сериал)\b", " ", q)
+        q = re.sub(r"\s+", " ", q).strip()
+        safe = anonymize_query(q, known_nicks, bot_aliases)
+        if safe:
+            # запрос не длиннее 8 слов
+            return " ".join(safe.split()[:8]) or None
+    return None
 
 
 class ResearchModule:

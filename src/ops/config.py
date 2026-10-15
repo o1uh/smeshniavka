@@ -56,21 +56,21 @@ class BotConfig(BaseModel):
     MODEL_ID: str = "fast"
     BRIDGE_URL: str = "http://127.0.0.1:8000"
     TZ: str = "Asia/Novosibirsk"
-    BOT_ALIASES: list[str] = Field(default_factory=lambda: ["смешняв", "смешнявка"])
+    BOT_ALIASES: list[str] = Field(default_factory=lambda: ["дик", "смешнявка"])
     SAFETY: str = "all OFF"
     PII_SCRUB: bool = True
     LOG_CONTENT: bool = False
 
     # Concurrency & priorities
-    MAX_CONCURRENT: int = 4
+    MAX_CONCURRENT: int = 6
     RPM_P0_RESERVE: int = 5
     BUDGET_P2_MAX: int = 70
     BUDGET_P1_MAX: int = 90
 
-    # Lane workers: chat (default talk) / track (audio) / media (rest).
+    # Lane workers: chat (default talk) / track x2 (audio) / media (rest) / sys (bg).
     # Sum should stay <= MAX_CONCURRENT so one slow gif can't eat the chat.
-    CHAT_MAX_CONCURRENT: int = 2
-    TRACK_MAX_CONCURRENT: int = 1
+    CHAT_MAX_CONCURRENT: int = 1
+    TRACK_MAX_CONCURRENT: int = 2
     MEDIA_MAX_CONCURRENT: int = 1
     # System lane: background P2 (dossier, style_filter) — не душит юзерскую медийку
     SYS_MAX_CONCURRENT: int = 1
@@ -122,11 +122,11 @@ class BotConfig(BaseModel):
     MEDIA_AUTO_REACT_ANIMATION_P: float = 0.03
 
     # Context & history
-    CTX_LAST: int = 60
-    SUMMARY_TOK: int = 800
+    CTX_LAST: int = 100
+    SUMMARY_TOK: int = 1000
     CHUNK_SUMMARY_TOK: int = 300
     THREAD_CHAIN_DEPTH: int = 3
-    THREAD_NEIGHBORS: int = 10
+    THREAD_NEIGHBORS: int = 12
 
     # Dossier
     DOSSIER_EVERY: int = 40

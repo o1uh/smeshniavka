@@ -82,7 +82,7 @@ async def test_promote_batch(tmp_path):
     added = await learner.maybe_promote()
     assert added == 2
     active = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
-    assert active["examples"] == [phrases[0], phrases[2]]
+    assert [e["text"] for e in active["examples"]] == [phrases[0], phrases[2]]
     # батч съеден из кандидатов
     rest = yaml.safe_load((tmp_path / "style_examples.candidates.yaml").read_text(encoding="utf-8"))
     assert rest["candidates"] == []

@@ -200,6 +200,49 @@ class MediaAnalyzer:
 
         return input_path
 
+    def _detect_silence_db(self, input_path: Path) -> Optional[float]:
+        """Средняя громкость через ffmpeg volumedetect (синхронно, вызывать через to_thread).
+
+        Возвращает mean_volume в дБ или None, если замерить не вышло.
+        """
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-i", str(input_path),
+                 "-af", "volumedetect", "-f", "null", os.devnull],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                check=False, timeout=30, text=True,
+            )
+            m = re.search(r"mean_volume:\s*(-?[\d.]+|-\s*inf)\s*dB", proc.stderr or "")
+            if not m:
+                return None
+            val = m.group(1).replace(" ", "")
+            if "inf" in val:
+                return float("-inf")
+            return float(val)
+        except Exception as e:
+            logger.warning("Silence detect failed for %s: %s", input_path, e)
+            return None
+
+    def _silent_audio_item(
+        self, file_unique_id: str, mean_db: Optional[float]
+    ) -> dict[str, Any]:
+        """Готовый разбор «тишины» без LLM: тихий файл нельзя оценить в 60+."""
+        loud = f"{mean_db:.1f} дБ" if mean_db is not None and mean_db != float("-inf") else "тишина"
+        return {
+            "file_unique_id": file_unique_id,
+            "kind": "audio",
+            "transcript": None,
+            "ocr_text": None,
+            "summary": f"тишина, почти ничего не слышно ({loud})",
+            "track_meta": None,
+            "tags": '["тишина"]',
+            "verdict": "три минуты тишины",
+            "score100": 0,
+            "score_reason": "там тупо тишина",
+            "unintelligible": 0,
+            "injection_suspected": 0,
+        }
+
     async def analyze_media_step1(
         self,
         file_path: Path,
@@ -254,6 +297,29 @@ class MediaAnalyzer:
         except Exception as e:
             logger.warning("Media convert to_thread failed: %s", e)
             converted_path = file_path
+
+        # Тихий/пустой трек режем кодом, а не вкусом модели: иначе тишина
+        # получает 60+ и выдуманные «арабские дудки». Порог −50 дБ.
+        if kind == "audio":
+            try:
+                mean_db: Optional[float] = await asyncio.to_thread(
+                    self._detect_silence_db, converted_path
+                )
+            except Exception:
+                mean_db = None
+            if mean_db is not None and mean_db <= -50.0:
+                item = self._silent_audio_item(file_unique_id, mean_db)
+                try:
+                    await self.db.save_media_cache(item, max_items=self.config.MEDIA_CACHE_MAX)
+                except Exception as e:
+                    logger.warning("Failed to cache silence verdict: %s", e)
+                try:
+                    if converted_path != file_path and converted_path.exists():
+                        converted_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                logger.info("Media %s is silence (%.1f dB), scored 0 without LLM", file_unique_id, mean_db)
+                return item
 
         # Чтение + base64 тоже вне loop
         def _read_b64(p: Path) -> Optional[str]:

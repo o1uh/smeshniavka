@@ -87,10 +87,22 @@ class PromptBuilder:
                     import yaml
                     data = yaml.safe_load(style_yaml_path.read_text(encoding="utf-8"))
                     if isinstance(data, dict):
-                        bank = [e for e in (data.get("examples") or []) if isinstance(e, str)]
-                        # Пермач (pinned) — всегда в пуле сэмплинга
-                        bank += [p for p in (data.get("pinned") or []) if isinstance(p, str) and p not in bank]
-                        style_examples = bank or None
+                        # Взвешенная подвыборка: прайм (хиты по смеякам) первым,
+                        # потом свежие. Пермач — всегда в пуле. Отложенный импорт:
+                        # learner тянет assemble, прямого импорта сверху нельзя.
+                        try:
+                            from src.style.learner import sample_for_prompt, norm_entry
+                            raw_bank = data.get("examples") or []
+                            bank = [e for e in (norm_entry(r) for r in raw_bank) if e]
+                            pinned = [p for p in (data.get("pinned") or []) if isinstance(p, str)]
+                            style_examples = sample_for_prompt(
+                                bank, pinned, style_examples_n or len(bank) or 8,
+                            )
+                        except ImportError:
+                            bank = [e for e in (data.get("examples") or []) if isinstance(e, str)]
+                            # Пермач (pinned) — всегда в пуле сэмплинга
+                            bank += [p for p in (data.get("pinned") or []) if isinstance(p, str) and p not in bank]
+                            style_examples = bank or None
                 except Exception:
                     pass
 

@@ -6,21 +6,22 @@ OWNER_IDS: []      # ID владельцев бота (также могут б�
 MODEL_ID: "fast"   # Быстрейшая модель через Antigravity Fast Bridge (алиас gemini-3.8-flash-low)
 BRIDGE_URL: "http://127.0.0.1:8000" # URL моста на RPi (или http://rpi.ln:8000 при внешнем запуске)
 TZ: "Asia/Novosibirsk"
-BOT_ALIASES: ["смешняв", "смешнявка"]
+BOT_ALIASES: ["дик", "смешнявка"]
 SAFETY: "all OFF"
 PII_SCRUB: true
 LOG_CONTENT: false
 
 # Concurrency & priorities
-MAX_CONCURRENT: 4
+MAX_CONCURRENT: 6
 RPM_P0_RESERVE: 5
 BUDGET_P2_MAX: 70
 BUDGET_P1_MAX: 90
 
-# Lane workers: chat — дефолтное общение, track — треки, media — остальное.
+# Lane workers: chat — дефолтное общение (1), track — треки (2 воркера),
+# media — остальное медиа (1), sys — фон (досье, обучение, 1).
 # Сумма лимитов <= MAX_CONCURRENT: медленная гифка не душит чат.
-CHAT_MAX_CONCURRENT: 2
-TRACK_MAX_CONCURRENT: 1
+CHAT_MAX_CONCURRENT: 1
+TRACK_MAX_CONCURRENT: 2
 MEDIA_MAX_CONCURRENT: 1
 # System lane: фон P2 (досье, style_filter)
 SYS_MAX_CONCURRENT: 1
@@ -76,11 +77,11 @@ MEDIA_AUTO_REACT_PHOTO_P: 0.03
 MEDIA_AUTO_REACT_ANIMATION_P: 0.03
 
 # Context & history
-CTX_LAST: 60
-SUMMARY_TOK: 800
+CTX_LAST: 100
+SUMMARY_TOK: 1000
 CHUNK_SUMMARY_TOK: 300
 THREAD_CHAIN_DEPTH: 3
-THREAD_NEIGHBORS: 10
+THREAD_NEIGHBORS: 12
 
 # Dossier
 DOSSIER_EVERY: 40

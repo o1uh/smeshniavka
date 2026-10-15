@@ -35,6 +35,51 @@ MEDIA_FORBIDDEN_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Склейка «констатация, подъёб» через запятую в коротком ответе:
+# две мысли, слепленные запятой вместо одной резкой
+def has_comma_glue(text: str, max_len: int = 200) -> bool:
+    """True, если короткий ответ слеплен из двух мыслей через запятую.
+
+    Длинные ответы по запросу (объяснения) не трогаем — там запятые норма.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > max_len:
+        return False
+    if t.count(",") < 1:
+        return False
+    # одна запятая, обе части самодостаточны — склейка
+    parts = [p.strip() for p in t.split(",")]
+    if len(parts) == 2 and all(len(p) >= 8 for p in parts):
+        return True
+    if t.count(",") >= 2:
+        return True
+    return False
+
+
+def _norm_words(text: str) -> set[str]:
+    return set(re.findall(r"[а-яёa-z]{3,}", (text or "").lower()))
+
+
+def is_repetitive(candidate: str, recent_bot_texts: list[str], threshold: float = 0.6) -> bool:
+    """True, если кандидат повторяет одну из своих последних реплик.
+
+    Сравниваем пересечение знаменательных слов: тот же панч теми же словами.
+    """
+    cand = _norm_words(candidate)
+    if len(cand) < 3:
+        return False
+    for prev in recent_bot_texts or []:
+        prev_words = _norm_words(prev)
+        if len(prev_words) < 3:
+            continue
+        inter = cand & prev_words
+        # доля общих слов от меньшей реплики
+        ratio = len(inter) / max(1, min(len(cand), len(prev_words)))
+        if ratio >= threshold:
+            return True
+    return False
+
+
 # Cliché insult patterns: noun + adjective or adjective + noun templates like
 # "ебака грозный", "клоун комнатный", "боец диванный", "диванный воин", "мамкин бандит", etc.
 CLICHE_INSULT_RE = re.compile(
